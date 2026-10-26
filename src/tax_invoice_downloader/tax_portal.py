@@ -325,108 +325,74 @@ class TaxPortalAutomation:
 
         for attempt in range(retry_limit + 1):
             try:
-                # 1. Scroll row into view and click
+                # 1. Click specifically on the first cell of the row (STT / Số HĐ)
+                # This highlights and selects the row cleanly without ever clicking links in other columns
                 row.scroll_into_view_if_needed(timeout=3000)
                 time.sleep(0.3)
-                row.click()
+
+                cells = row.locator("td")
+                if cells.count() >= 2:
+                    cells.nth(0).click()
+                else:
+                    row.click()
+
                 logger.debug(f"Đã click chọn dòng hóa đơn số {expected_key.sh_hoa_don}")
+                time.sleep(0.5)
 
-                # Ensure checkbox or radio is selected (avoid unchecking if already checked)
-                try:
-                    cb = row.locator("input[type='checkbox'], input[type='radio']").first
-                    if cb.is_visible(timeout=200):
-                        if not cb.is_checked():
-                            cb.click()
-                    else:
-                        ant_cb = row.locator(".ant-checkbox, .ant-radio").first
-                        if ant_cb.is_visible(timeout=200):
-                            classes = ant_cb.get_attribute("class") or ""
-                            if "checked" not in classes:
-                                ant_cb.click()
-                except Exception:
-                    pass
-
-                time.sleep(0.6)
-
-                # 2. Find download trigger button
+                # 2. Find the exact 'Xuất hóa đơn' (Xuất XML) button on the toolbar
+                # Uses the exact SVG ID #icon_ketxuat / #clip-icon_ketxuat provided from actual portal HTML
                 download_button = None
-                selectors = [
-                    # Specific XML / ZIP download buttons (Toolbar or Modal)
-                    ".ant-modal button:has-text('Xuất XML')",
-                    ".ant-modal button:has-text('Tải XML')",
-                    ".ant-modal button:has-text('Tải hóa đơn')",
-                    ".ant-modal button:has-text('Tải về')",
-                    ".ant-modal button:has-text('XML')",
-                    ".ant-modal a:has-text('Xuất XML')",
-                    ".ant-modal a:has-text('Tải XML')",
-                    ".ant-modal a:has-text('Tải về')",
-                    ".ant-modal a:has-text('XML')",
-                    # Toolbar action buttons
-                    "button:has-text('Xuất XML')",
-                    "button:has-text('Tải XML')",
-                    "button:has-text('Tải hóa đơn')",
-                    "button:has-text('Xuất tệp XML')",
-                    "button:has-text('Tải tệp XML')",
-                    "button:has-text('Tải file XML')",
-                    "button:has-text('Xuất file XML')",
-                    "button:has-text('Xuất dữ liệu')",
-                    "button:has-text('Tải về'):not(:has-text('Tải lại'))",
-                    "button:has-text('XML')",
-                    ".ant-btn:has(.anticon-download)",
-                    ".ant-btn:has(.anticon-export)",
-                    "a:has-text('Xuất XML')",
-                    "a:has-text('Tải XML')",
-                    "a:has-text('Tải về'):not(:has-text('Tải lại'))",
-                    "a:has-text('XML')",
-                    "span:has-text('Xuất XML')",
-                    "span:has-text('Tải XML')",
-                    "button[title*='XML']",
-                    "button[title*='Tải']:not([title*='Tải lại'])",
+                exact_selectors = [
+                    "button:has(#icon_ketxuat)",
+                    "button:has(#clip-icon_ketxuat)",
+                    "button:has(#Path_53113)",
+                    "button:has(#Path_53114)",
+                    "button:has([id*='ketxuat'])",
+                    ".ant-btn:has(#icon_ketxuat)",
+                    ".ant-btn:has(#clip-icon_ketxuat)",
+                    ".ant-btn:has(#Path_53113)",
+                    "button.ButtonAnt__IconButton-sc-p5q16s-1:has(svg [id*='ketxuat'])",
+                    "button.ButtonAnt__IconButton-sc-p5q16s-1:has(#icon_ketxuat)",
+                    "button[title*='Xuất xml']",
+                    "button[title*='Xuất XML']",
                 ]
 
-                for sel in selectors:
+                for sel in exact_selectors:
                     btn = page.locator(sel).first
                     if btn.is_visible(timeout=500):
                         download_button = btn
                         break
 
-                # Check inside row action buttons if toolbar button not visible
+                # Priority 2: 4th icon-only button in the toolbar group above table
                 if not download_button:
-                    action_btn = row.locator("button, a, i.anticon-download, span").filter(
-                        has_text=re.compile(r"xml|tải|download", re.I)
-                    ).first
-                    if action_btn.is_visible(timeout=500):
-                        download_button = action_btn
+                    icon_btns = page.locator(".ant-btn-icon-only, .ButtonAnt__IconButton-sc-p5q16s-1")
+                    count = icon_btns.count()
+                    if count >= 4:
+                        cand = icon_btns.nth(3)
+                        if cand.is_visible(timeout=300):
+                            download_button = cand
 
+                # Priority 3: Fallback button selectors
                 if not download_button:
-                    # Check action column icon/button
-                    row_btn = row.locator(".anticon-download, td:last-child button, td:last-child a").first
-                    if row_btn.is_visible(timeout=500):
-                        download_button = row_btn
-
-                if not download_button:
-                    # If still not found, try 'Xem hóa đơn' / double-click to open modal with download button
-                    view_btn = page.locator(
-                        "button:has-text('Xem hóa đơn'), button:has-text('Xem chi tiết'), .ant-btn:has(.anticon-eye), a:has-text('Xem')"
-                    ).first
-                    if view_btn.is_visible(timeout=500):
-                        view_btn.click()
-                    else:
-                        row.dblclick()
-
-                    time.sleep(1.0)
-                    for sel in selectors:
+                    for sel in [
+                        "button:has-text('Xuất XML')",
+                        "button:has-text('Xuất xml')",
+                        "button:has-text('Tải XML')",
+                        "button:has-text('Tải hóa đơn')",
+                        ".ant-btn:has(.anticon-download)",
+                        ".ant-btn:has(.anticon-export)",
+                    ]:
                         btn = page.locator(sel).first
-                        if btn.is_visible(timeout=500):
+                        if btn.is_visible(timeout=300):
                             download_button = btn
                             break
 
                 if not download_button:
                     raise DownloadManagerError(
-                        f"Không tìm thấy nút tải XML cho hóa đơn số {expected_key.sh_hoa_don}"
+                        f"Không tìm thấy nút 'Xuất XML' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
-                # 3. Trigger download and intercept
+                # 3. Intercept and trigger download
                 temp_downloads_dir = self.download_manager.downloads_dir
 
                 # Check if clicking button opens a dropdown menu (e.g. format choice: XML vs PDF)
