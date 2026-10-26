@@ -13,26 +13,19 @@ if exist "C:\Users\user\AppData\Local\Python\pythoncore-3.15-64\python.exe" (
 echo ========================================================
 echo   CÔNG CỤ TỰ ĐỘNG TẢI XML HÓA ĐƠN TỪ CỔNG THUẾ
 echo ========================================================
-echo Python: %PY_CMD%
-echo.
 
-echo [1/3] Đang kiểm tra thư viện Python...
-"%PY_CMD%" -m pip install -r requirements.txt
+:: Kiểm tra nếu chưa cài thư viện thì mới tiến hành cài đặt
+"%PY_CMD%" -c "import playwright, openpyxl, lxml" >nul 2>nul
 if errorlevel 1 (
-    echo [LỖI] Không thể cài đặt các thư viện cần thiết.
-    pause
-    exit /b 1
+    echo [Thong bao] Dang cai dat thu vien can thiet, vui long doi trong giay lat...
+    "%PY_CMD%" -m pip install -r requirements.txt
+    "%PY_CMD%" -m playwright install chromium
 )
 
-echo.
-echo [2/3] Đang kiểm tra trình duyệt Chromium Playwright...
-"%PY_CMD%" -m playwright install chromium
-
-echo.
-echo [3/3] Đang khởi chạy giao diện ứng dụng...
+echo [Khoi dong] Dang mo giao dien Tool...
 "%PY_CMD%" main.py
 if errorlevel 1 (
     echo.
-    echo Ứng dụng đã đóng với mã lỗi.
+    echo Da xay ra loi khi chay ung dung.
     pause
 )
