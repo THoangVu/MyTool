@@ -1,0 +1,13 @@
+browser_profile/
+downloads/*
+!downloads/.gitkeep
+ALLINVOICE/*
+!ALLINVOICE/.gitkeep
+logs/*
+!logs/.gitkeep
+output/*
+!output/.gitkeep
+__pycache__/
+*.py[cod]
+.venv/
+.env
