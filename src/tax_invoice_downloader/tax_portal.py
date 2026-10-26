@@ -188,8 +188,38 @@ class TaxPortalAutomation:
             pass
         time.sleep(1.0)
 
-    def extract_row_data(self, row: Locator) -> Dict[str, str]:
-        """Extracts text from cells in an Ant Design table row."""
+    def _get_column_map(self, page: Page) -> Dict[str, int]:
+        """Dynamically maps table header titles to column indices."""
+        col_map: Dict[str, int] = {}
+        try:
+            th_loc = page.locator("table thead th, div.ant-table-header th, .ant-table-thead th")
+            count = th_loc.count()
+            for i in range(count):
+                txt = th_loc.nth(i).inner_text().strip().lower()
+                if "số hóa đơn" in txt or "số hđ" in txt:
+                    col_map["sh_hoa_don"] = i
+                elif "mẫu số" in txt:
+                    col_map["kh_mau_so"] = i
+                elif "ký hiệu" in txt:
+                    col_map["kh_hoa_don"] = i
+                elif "ngày lập" in txt or "ngày hđ" in txt:
+                    col_map["ngay_lap"] = i
+                elif "mst người bán" in txt or "mã số thuế người bán" in txt:
+                    col_map["mst_nguoi_ban"] = i
+                elif "người bán" in txt or "tên người bán" in txt:
+                    col_map["thong_tin_nguoi_ban"] = i
+                elif "tiền chưa thuế" in txt or "chưa thuế" in txt:
+                    col_map["tien_chua_thue"] = i
+                elif "tiền thuế" in txt:
+                    col_map["tien_thue"] = i
+                elif "tổng tiền" in txt or "thanh toán" in txt:
+                    col_map["tong_tien"] = i
+        except Exception:
+            pass
+        return col_map
+
+    def extract_row_data(self, row: Locator, col_map: Optional[Dict[str, int]] = None) -> Dict[str, str]:
+        """Extracts text from cells in an Ant Design table row with dynamic mapping and regex fallback."""
         cells = row.locator("td")
         cell_count = cells.count()
         cell_texts = [cells.nth(i).inner_text().strip() for i in range(cell_count)]
@@ -208,30 +238,44 @@ class TaxPortalAutomation:
             "tong_tien": "",
         }
 
-        # Fallback mapping based on typical tax portal column positions:
-        # 0: STT, 1: MST Mua, 2: Mẫu số, 3: Ký hiệu, 4: Số HĐ, 5: Ngày lập, 6: Người bán, 7: Tiền chưa thuế, 8: Thuế, 11: Tổng thanh toán
-        if cell_count >= 6:
-            data["stt"] = cell_texts[0]
-            data["mst_nguoi_mua"] = cell_texts[1]
-            data["kh_mau_so"] = cell_texts[2]
-            data["kh_hoa_don"] = cell_texts[3]
-            # Clean invoice number
-            raw_sh = cell_texts[4]
-            data["sh_hoa_don"] = raw_sh.strip()
-            data["ngay_lap"] = cell_texts[5]
+        # 1. Use column mapping if detected
+        if col_map:
+            for field, idx in col_map.items():
+                if idx < cell_count:
+                    data[field] = cell_texts[idx]
 
-        if cell_count >= 7:
-            seller_info = cell_texts[6]
-            data["thong_tin_nguoi_ban"] = seller_info
-            # Try to extract 10-14 digit tax code from seller info
-            mst_match = re.search(r"\b\d{10}(?:-\d{3})?\b", seller_info)
-            if mst_match:
-                data["mst_nguoi_ban"] = mst_match.group(0)
+        # 2. Positional fallback if primary fields still missing
+        if not data["sh_hoa_don"] and cell_count >= 5:
+            # Check if first cell is checkbox column
+            offset = 1 if (cell_count > 6 and not cell_texts[0]) else 0
+            if cell_count > offset + 4:
+                data["stt"] = cell_texts[offset]
+                data["kh_mau_so"] = cell_texts[offset + 1]
+                data["kh_hoa_don"] = cell_texts[offset + 2]
+                data["sh_hoa_don"] = cell_texts[offset + 3].strip()
+                data["ngay_lap"] = cell_texts[offset + 4].strip()
 
-        # Also inspect data-row-key attribute if present
+        # 3. Pattern-matching fallback across all cells for critical fields
+        for txt in cell_texts:
+            # Match Date (DD/MM/YYYY)
+            if not data["ngay_lap"] and re.search(r"\b\d{2}/\d{2}/\d{4}\b", txt):
+                data["ngay_lap"] = re.search(r"\b\d{2}/\d{2}/\d{4}\b", txt).group(0)
+
+            # Match MST (10 or 13-14 digits)
+            if not data["mst_nguoi_ban"] and re.search(r"\b\d{10}(?:-\d{3})?\b", txt):
+                data["mst_nguoi_ban"] = re.search(r"\b\d{10}(?:-\d{3})?\b", txt).group(0)
+
+            # Match Invoice Symbol (e.g. C26TNT, 1C23TLL)
+            if not data["kh_hoa_don"] and re.search(r"\b[1-9]?[A-Z]\d{2}[A-Z0-9]{2,4}\b", txt):
+                data["kh_hoa_don"] = re.search(r"\b[1-9]?[A-Z]\d{2}[A-Z0-9]{2,4}\b", txt).group(0)
+
+        # Clean invoice number
+        if data["sh_hoa_don"]:
+            data["sh_hoa_don"] = "".join(c for c in data["sh_hoa_don"] if c.isdigit())
+
+        # Inspect data-row-key attribute if present
         row_key = row.get_attribute("data-row-key") or ""
         if row_key and not data["mst_nguoi_ban"]:
-            # data-row-key often contains {id}_{mst}_{kh}_{sh}
             parts = row_key.split("_")
             for part in parts:
                 if re.match(r"^\d{10}(?:-\d{3})?$", part):
@@ -239,6 +283,23 @@ class TaxPortalAutomation:
                     break
 
         return data
+
+    def _get_table_rows(self, page: Page) -> Locator:
+        """Finds main table rows avoiding duplicates from Ant Design fixed-column sidebars."""
+        selectors = [
+            "div.ant-table-scroll div.ant-table-body tr.ant-table-row",
+            "div.ant-table-body table tbody tr.ant-table-row",
+            ".ant-table-fixed-left tbody tr.ant-table-row",
+            "div.ant-table-content table tbody tr.ant-table-row",
+            ".ant-table-tbody tr.ant-table-row",
+            "tr.ant-table-row",
+            "table tbody tr:not(.ant-table-placeholder):not(:has(th))",
+        ]
+        for sel in selectors:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                return loc
+        return page.locator("tr.ant-table-row")
 
     def download_invoice_row(
         self,
@@ -249,12 +310,10 @@ class TaxPortalAutomation:
     ) -> Optional[InvoiceHeader]:
         """Executes the download workflow for a single invoice row:
 
-        1. Clicks the row.
-        2. Waits for detail modal / action toolbar.
-        3. Clicks download button and intercepts the download.
-        4. Processes ZIP via DownloadManager.
+        1. Clicks the row and ensures selection without unchecking.
+        2. Finds and triggers the download button (toolbar, row action, or detail modal).
+        3. Intercepts ZIP download and processes it.
         """
-        self.check_session(page)
         expected_key = InvoiceKey(
             mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
             kh_hoa_don=row_data.get("kh_hoa_don", ""),
@@ -266,68 +325,136 @@ class TaxPortalAutomation:
 
         for attempt in range(retry_limit + 1):
             try:
-                # Scroll row into view and click
+                # 1. Scroll row into view and click
                 row.scroll_into_view_if_needed(timeout=3000)
                 time.sleep(0.3)
                 row.click()
                 logger.debug(f"Đã click chọn dòng hóa đơn số {expected_key.sh_hoa_don}")
-                time.sleep(0.8)
 
-                # Find download trigger
+                # Ensure checkbox or radio is selected (avoid unchecking if already checked)
+                try:
+                    cb = row.locator("input[type='checkbox'], input[type='radio']").first
+                    if cb.is_visible(timeout=200):
+                        if not cb.is_checked():
+                            cb.click()
+                    else:
+                        ant_cb = row.locator(".ant-checkbox, .ant-radio").first
+                        if ant_cb.is_visible(timeout=200):
+                            classes = ant_cb.get_attribute("class") or ""
+                            if "checked" not in classes:
+                                ant_cb.click()
+                except Exception:
+                    pass
+
+                time.sleep(0.6)
+
+                # 2. Find download trigger button
                 download_button = None
                 selectors = [
-                    # Modal / dialog buttons
-                    ".ant-modal button:has-text('Tải về')",
+                    # Specific XML / ZIP download buttons (Toolbar or Modal)
+                    ".ant-modal button:has-text('Xuất XML')",
                     ".ant-modal button:has-text('Tải XML')",
+                    ".ant-modal button:has-text('Tải hóa đơn')",
+                    ".ant-modal button:has-text('Tải về')",
                     ".ant-modal button:has-text('XML')",
-                    ".ant-modal .ant-btn-primary:has-text('Tải')",
-                    # Toolbar buttons outside modal
-                    "button:has-text('Tải về')",
-                    "button:has-text('Tải XML')",
+                    ".ant-modal a:has-text('Xuất XML')",
+                    ".ant-modal a:has-text('Tải XML')",
+                    ".ant-modal a:has-text('Tải về')",
+                    ".ant-modal a:has-text('XML')",
+                    # Toolbar action buttons
                     "button:has-text('Xuất XML')",
+                    "button:has-text('Tải XML')",
                     "button:has-text('Tải hóa đơn')",
-                    ".ant-btn:has(.anticon-download)",
-                    "a:has-text('Tải về')",
+                    "button:has-text('Xuất tệp XML')",
+                    "button:has-text('Tải tệp XML')",
+                    "button:has-text('Tải file XML')",
+                    "button:has-text('Xuất file XML')",
+                    "button:has-text('Xuất dữ liệu')",
+                    "button:has-text('Tải về'):not(:has-text('Tải lại'))",
                     "button:has-text('XML')",
+                    ".ant-btn:has(.anticon-download)",
+                    ".ant-btn:has(.anticon-export)",
+                    "a:has-text('Xuất XML')",
+                    "a:has-text('Tải XML')",
+                    "a:has-text('Tải về'):not(:has-text('Tải lại'))",
+                    "a:has-text('XML')",
+                    "span:has-text('Xuất XML')",
+                    "span:has-text('Tải XML')",
+                    "button[title*='XML']",
+                    "button[title*='Tải']:not([title*='Tải lại'])",
                 ]
 
                 for sel in selectors:
                     btn = page.locator(sel).first
-                    if btn.is_visible(timeout=1000):
+                    if btn.is_visible(timeout=500):
                         download_button = btn
                         break
 
+                # Check inside row action buttons if toolbar button not visible
                 if not download_button:
-                    # If button not found, try double click or row action button
-                    action_btn = row.locator("button, a, i.anticon-download").first
-                    if action_btn.is_visible(timeout=1000):
+                    action_btn = row.locator("button, a, i.anticon-download, span").filter(
+                        has_text=re.compile(r"xml|tải|download", re.I)
+                    ).first
+                    if action_btn.is_visible(timeout=500):
                         download_button = action_btn
+
+                if not download_button:
+                    # Check action column icon/button
+                    row_btn = row.locator(".anticon-download, td:last-child button, td:last-child a").first
+                    if row_btn.is_visible(timeout=500):
+                        download_button = row_btn
+
+                if not download_button:
+                    # If still not found, try 'Xem hóa đơn' / double-click to open modal with download button
+                    view_btn = page.locator(
+                        "button:has-text('Xem hóa đơn'), button:has-text('Xem chi tiết'), .ant-btn:has(.anticon-eye), a:has-text('Xem')"
+                    ).first
+                    if view_btn.is_visible(timeout=500):
+                        view_btn.click()
+                    else:
+                        row.dblclick()
+
+                    time.sleep(1.0)
+                    for sel in selectors:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=500):
+                            download_button = btn
+                            break
 
                 if not download_button:
                     raise DownloadManagerError(
                         f"Không tìm thấy nút tải XML cho hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
-                # Trigger download and intercept
+                # 3. Trigger download and intercept
                 temp_downloads_dir = self.download_manager.downloads_dir
-                with page.expect_download(timeout=20000) as download_info:
+
+                # Check if clicking button opens a dropdown menu (e.g. format choice: XML vs PDF)
+                dropdown_item = None
+                with page.expect_download(timeout=25000) as download_info:
                     download_button.click()
+                    # Check if a dropdown menu popped up needing a sub-click
+                    try:
+                        dd_opt = page.locator(
+                            ".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item:has-text('XML'), "
+                            ".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item:has-text('Tải')"
+                        ).first
+                        if dd_opt.is_visible(timeout=1000):
+                            dd_opt.click()
+                    except Exception:
+                        pass
 
                 download = download_info.value
                 suggested_filename = download.suggested_filename or "invoice.zip"
                 temp_save_path = temp_downloads_dir / suggested_filename
 
-                # Avoid collision in temp folder
-                if temp_save_path.exists():
-                    temp_save_path = temp_downloads_dir / f"{time.time_ns()}_{suggested_filename}"
-
                 download.save_as(str(temp_save_path))
                 logger.info(f"Đã nhận file tải về: {temp_save_path.name}")
 
-                # Close any opened modal to reset UI for next row
+                # 4. Close any opened modal to reset UI for next row
                 self._close_modal_if_open(page)
 
-                # Process downloaded ZIP
+                # 5. Process downloaded ZIP
                 _, invoice_header = self.download_manager.process_downloaded_zip(
                     zip_path=temp_save_path,
                     expected_key=expected_key,
@@ -357,7 +484,7 @@ class TaxPortalAutomation:
     def _close_modal_if_open(self, page: Page):
         """Closes Ant Design modal dialog if currently displayed."""
         try:
-            close_btn = page.locator(".ant-modal-close, button:has-text('Đóng'), .ant-modal-footer button").first
+            close_btn = page.locator(".ant-modal-close, button:has-text('Đóng'), .ant-modal-footer button:has-text('Đóng')").first
             if close_btn.is_visible(timeout=800):
                 close_btn.click()
                 time.sleep(0.5)
@@ -377,19 +504,21 @@ class TaxPortalAutomation:
         - Supports graceful cancellation via request_stop().
         """
         self._stop_requested = False
-        self.check_session(page)
         processed_count = 0
         current_page_num = 1
 
         while not self._stop_requested:
             self._wait_for_table_loaded(page)
-            rows = page.locator("table tbody tr.ant-table-row, div.ant-table-body tr.ant-table-row")
+            col_map = self._get_column_map(page)
+            rows = self._get_table_rows(page)
             row_count = rows.count()
             logger.info(f"Trang {current_page_num}: Tìm thấy {row_count} dòng hóa đơn.")
 
             if row_count == 0:
-                logger.info("Không có dữ liệu hóa đơn trên trang hiện tại.")
+                logger.info("Không có dòng hóa đơn nào trên trang hiện tại.")
                 break
+
+            seen_keys_on_page = set()
 
             for i in range(row_count):
                 if self._stop_requested:
@@ -400,8 +529,13 @@ class TaxPortalAutomation:
                     logger.info(f"Đã đạt số lượng tối đa cần tải ({max_invoices}).")
                     break
 
-                row = rows.nth(i)
-                row_data = self.extract_row_data(row)
+                # Re-query rows in case DOM refreshed
+                current_rows = self._get_table_rows(page)
+                if i >= current_rows.count():
+                    break
+                row = current_rows.nth(i)
+
+                row_data = self.extract_row_data(row, col_map=col_map)
                 candidate_key = InvoiceKey(
                     mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
                     kh_hoa_don=row_data.get("kh_hoa_don", ""),
@@ -410,8 +544,18 @@ class TaxPortalAutomation:
                 )
                 key_str = candidate_key.normalized_key()
 
+                # Deduplicate fixed-column duplicate elements on the same page
+                unique_row_id = f"{candidate_key.sh_hoa_don}_{candidate_key.kh_hoa_don}_{candidate_key.ngay_lap}"
+                if unique_row_id in seen_keys_on_page and candidate_key.sh_hoa_don:
+                    continue
+                seen_keys_on_page.add(unique_row_id)
+
                 # Check if already processed
-                if key_str and self.download_manager.manifest_db.is_invoice_completed(key_str):
+                if self.download_manager.manifest_db.is_invoice_completed(
+                    invoice_key=key_str,
+                    sh_hoa_don=candidate_key.sh_hoa_don,
+                    kh_hoa_don=candidate_key.kh_hoa_don,
+                ):
                     logger.info(f"Hóa đơn {candidate_key.sh_hoa_don} ({candidate_key.kh_hoa_don}) đã hoàn thành trước đó. Bỏ qua.")
                     if progress_callback:
                         progress_callback(processed_count + 1, row_count, f"Bỏ qua (đã có): {candidate_key.sh_hoa_don}")
@@ -432,8 +576,20 @@ class TaxPortalAutomation:
                 break
 
             # Handle pagination
-            next_btn = page.locator("li.ant-pagination-next:not(.ant-pagination-disabled) button, li.ant-pagination-next:not(.ant-pagination-disabled) a").first
-            if next_btn.is_visible(timeout=2000):
+            next_selectors = [
+                "li.ant-pagination-next:not(.ant-pagination-disabled) button",
+                "li.ant-pagination-next:not(.ant-pagination-disabled) a",
+                "li.ant-pagination-next:not(.ant-pagination-disabled) .ant-pagination-item-link",
+                ".ant-pagination-next:not(.ant-pagination-disabled)",
+            ]
+            next_btn = None
+            for sel in next_selectors:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=1200):
+                    next_btn = btn
+                    break
+
+            if next_btn:
                 logger.info("Chuyển sang trang tiếp theo...")
                 next_btn.click()
                 current_page_num += 1

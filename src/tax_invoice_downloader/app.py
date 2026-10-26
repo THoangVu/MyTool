@@ -149,25 +149,19 @@ class TaxInvoiceApp(tk.Tk):
         )
         self.lbl_session_status.pack(anchor=tk.W, pady=(6, 0))
 
-        # Panel 2: Bộ lọc tra cứu
-        filter_frame = ttk.LabelFrame(top_grid, text="Bước 2: Bộ lọc tra cứu hóa đơn", padding=10)
+        # Panel 2: Cài đặt và Hướng dẫn
+        filter_frame = ttk.LabelFrame(top_grid, text="Bước 2: Hướng dẫn & Cài đặt tải", padding=10)
         filter_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(6, 0))
 
-        today_str = datetime.now().strftime("%d/%m/%Y")
-        first_day_str = datetime.now().replace(day=1).strftime("%d/%m/%Y")
-
-        date_box = ttk.Frame(filter_frame)
-        date_box.pack(fill=tk.X, pady=(0, 6))
-
-        ttk.Label(date_box, text="Từ ngày:").pack(side=tk.LEFT, padx=(0, 4))
-        self.txt_from_date = ttk.Entry(date_box, width=12)
-        self.txt_from_date.insert(0, first_day_str)
-        self.txt_from_date.pack(side=tk.LEFT, padx=(0, 12))
-
-        ttk.Label(date_box, text="Đến ngày:").pack(side=tk.LEFT, padx=(0, 4))
-        self.txt_to_date = ttk.Entry(date_box, width=12)
-        self.txt_to_date.insert(0, today_str)
-        self.txt_to_date.pack(side=tk.LEFT)
+        guide_lbl = ttk.Label(
+            filter_frame,
+            text="1. Trên web: Tra cứu ➔ Tra cứu hóa đơn ➔ Hóa đơn mua vào.\n"
+                 "2. Tự chọn khoảng ngày & bấm 'Tìm kiếm' trên web.\n"
+                 "3. Khi bảng kết quả hiện ra, bấm '🚀 2. Bắt đầu tải XML hóa đơn'.",
+            foreground="#1F2937",
+            font=("Segoe UI", 9)
+        )
+        guide_lbl.pack(anchor=tk.W, pady=(0, 6))
 
         sub_opts = ttk.Frame(filter_frame)
         sub_opts.pack(fill=tk.X)
@@ -361,29 +355,57 @@ class TaxInvoiceApp(tk.Tk):
         )
 
     def _start_download_action(self):
-        """Starts automated invoice downloading in background thread."""
+        """Starts automated invoice downloading from the active table currently displayed on screen."""
         if self.is_running:
             return
 
-        page = self.browser_manager.page
-        if not page:
-            messagebox.showinfo("Chưa mở trình duyệt", "Vui lòng bấm '1. Mở Cổng Thuế' trước khi tải.")
+        # Ensure active browser page
+        if not self.browser_manager.context or not self.browser_manager.context.pages:
+            messagebox.showinfo(
+                "Chưa mở trình duyệt",
+                "Trình duyệt chưa được mở.\n\nVui lòng bấm '🌐 1. Mở Cổng Thuế' trước, sau đó tự đăng nhập và tìm kiếm danh sách hóa đơn."
+            )
             return
 
-        # If not manually confirmed, run auto-check
-        if not self.is_session_confirmed:
-            logged_in, msg = self.browser_manager.check_login_status(page)
-            if not logged_in:
+        # Search for the page that contains invoice table or is tax portal
+        pages = self.browser_manager.context.pages
+        target_page = None
+        for p in reversed(pages):
+            try:
+                if self.automation._get_table_rows(p).count() > 0:
+                    target_page = p
+                    break
+            except Exception:
+                pass
+
+        if not target_page:
+            for p in reversed(pages):
+                if "gdt.gov.vn" in p.url:
+                    target_page = p
+                    break
+
+        if not target_page:
+            target_page = pages[-1]
+
+        page = target_page
+        self.browser_manager._page = page
+
+        # Quick check if table is visible on the current page
+        try:
+            rows = self.automation._get_table_rows(page)
+            if rows.count() == 0:
                 if not messagebox.askyesno(
-                    "Xác nhận phiên đăng nhập",
-                    f"Trạng thái kiểm tra: {msg}\n\nNếu bạn đã đăng nhập thành công vào cổng Thuế trên trình duyệt, bấm [Yes / Có] để tiếp tục tải ngay!"
+                    "Chưa thấy bảng hóa đơn",
+                    "Hiện tại chưa thấy danh sách hóa đơn hiển thị trên trình duyệt.\n\n"
+                    "Bạn đã thao tác trên web:\n"
+                    "1. Vào: Tra cứu ➔ Tra cứu hóa đơn ➔ Hóa đơn mua vào\n"
+                    "2. Đã bấm nút 'Tìm kiếm' để bảng hiện ra chưa?\n\n"
+                    "Nếu bảng đã hiện ra, bấm [Yes / Có] để tiếp tục tải ngay!"
                 ):
                     return
-                self.is_session_confirmed = True
-                self.lbl_session_status.config(text="● Đã đăng nhập Cổng Thuế", foreground="#059669")
+        except Exception:
+            pass
 
-        from_date = self.txt_from_date.get().strip()
-        to_date = self.txt_to_date.get().strip()
         try:
             delay = float(self.delay_spin.get())
         except ValueError:
@@ -394,25 +416,20 @@ class TaxInvoiceApp(tk.Tk):
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_bar.start(10)
-        self.lbl_status.config(text="Đang xử lý tải hóa đơn...")
+        self.lbl_status.config(text="Đang bắt đầu quét bảng và tải hóa đơn...")
 
         self.worker_thread = threading.Thread(
             target=self._worker_download_loop,
-            args=(page, from_date, to_date),
+            args=(page,),
             daemon=True
         )
         self.worker_thread.start()
 
-    def _worker_download_loop(self, page, from_date: str, to_date: str):
+    def _worker_download_loop(self, page):
         try:
-            # 1. Navigate to purchase invoices tab
-            self.automation.navigate_to_purchase_invoices(page)
+            logger.info("Bắt đầu duyệt và tải hóa đơn từ bảng kết quả trên trình duyệt...")
 
-            # 2. Apply filters if specified
-            if from_date or to_date:
-                self.automation.apply_filters_and_search(page, from_date, to_date)
-
-            # 3. Process all invoices with live progress callback
+            # Process all invoices directly from the current table
             def on_progress(current, total, status_text):
                 self.after(0, lambda: self.lbl_status.config(text=f"Tiến độ: [{current}/{total}] {status_text}"))
                 stats = self.manifest_db.get_summary_stats()

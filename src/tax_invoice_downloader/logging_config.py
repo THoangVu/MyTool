@@ -91,17 +91,27 @@ class ManifestDB:
             """)
             conn.commit()
 
-    def is_invoice_completed(self, invoice_key: str) -> bool:
+    def is_invoice_completed(self, invoice_key: str, sh_hoa_don: str = "", kh_hoa_don: str = "") -> bool:
         """Checks if an invoice has already been successfully extracted."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT status, xml_filename FROM invoice_manifest WHERE invoice_key = ?",
-                (invoice_key,)
-            )
-            row = cursor.fetchone()
-            if row and row["status"] in ("XML_EXTRACTED", "EXPORTED"):
-                return True
+            if invoice_key:
+                cursor.execute(
+                    "SELECT status FROM invoice_manifest WHERE invoice_key = ? AND status IN ('XML_EXTRACTED', 'EXPORTED')",
+                    (invoice_key,)
+                )
+                if cursor.fetchone():
+                    return True
+            if sh_hoa_don:
+                clean_sh = "".join(c for c in sh_hoa_don if c.isdigit())
+                clean_kh = "".join(c for c in kh_hoa_don if c.isalnum() or c in ("-", "_"))
+                if clean_kh:
+                    cursor.execute(
+                        "SELECT status FROM invoice_manifest WHERE (sh_hoa_don = ? OR sh_hoa_don = ?) AND kh_hoa_don = ? AND status IN ('XML_EXTRACTED', 'EXPORTED')",
+                        (clean_sh, clean_sh.zfill(8), clean_kh)
+                    )
+                    if cursor.fetchone():
+                        return True
         return False
 
     def get_invoice_status(self, invoice_key: str) -> Optional[Dict[str, Any]]:
