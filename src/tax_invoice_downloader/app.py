@@ -44,6 +44,7 @@ class TaxInvoiceApp(tk.Tk):
 
         self.worker_thread: Optional[threading.Thread] = None
         self.is_running = False
+        self.is_session_confirmed = False
 
         self._setup_styles()
         self._build_ui()
@@ -124,6 +125,14 @@ class TaxInvoiceApp(tk.Tk):
             command=self._open_browser_action
         )
         self.btn_open_browser.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_confirm_login = ttk.Button(
+            sess_btn_box,
+            text="✅ Đã đăng nhập, tiếp tục",
+            style="Action.TButton",
+            command=self._confirm_login_action
+        )
+        self.btn_confirm_login.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_check_login = ttk.Button(
             sess_btn_box,
@@ -341,6 +350,16 @@ class TaxInvoiceApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Lỗi", f"Lỗi kiểm tra phiên: {e}")
 
+    def _confirm_login_action(self):
+        """Allows user to manually confirm login as specified in SPEC section 6."""
+        self.is_session_confirmed = True
+        self.lbl_session_status.config(text="● Đã xác nhận đăng nhập Cổng Thuế", foreground="#059669")
+        self.lbl_status.config(text="Sẵn sàng! Bấm '2. Bắt đầu tải XML hóa đơn' để tiến hành tải.")
+        messagebox.showinfo(
+            "Đã xác nhận",
+            "Đã xác nhận phiên đăng nhập thành công!\n\nBạn có thể bấm '2. Bắt đầu tải XML hóa đơn' để tải tự động."
+        )
+
     def _start_download_action(self):
         """Starts automated invoice downloading in background thread."""
         if self.is_running:
@@ -348,16 +367,20 @@ class TaxInvoiceApp(tk.Tk):
 
         page = self.browser_manager.page
         if not page:
-            messagebox.showinfo("Chưa mở trình duyệt", "Vui lòng bấm '1. Mở Cổng Thuế' và đăng nhập trước khi tải.")
+            messagebox.showinfo("Chưa mở trình duyệt", "Vui lòng bấm '1. Mở Cổng Thuế' trước khi tải.")
             return
 
-        logged_in, msg = self.browser_manager.check_login_status(page)
-        if not logged_in:
-            if not messagebox.askyesno(
-                "Xác nhận phiên",
-                f"Trạng thái phiên: {msg}\n\nBạn có chắc chắn đã đăng nhập vào cổng Thuế và muốn tiếp tục?"
-            ):
-                return
+        # If not manually confirmed, run auto-check
+        if not self.is_session_confirmed:
+            logged_in, msg = self.browser_manager.check_login_status(page)
+            if not logged_in:
+                if not messagebox.askyesno(
+                    "Xác nhận phiên đăng nhập",
+                    f"Trạng thái kiểm tra: {msg}\n\nNếu bạn đã đăng nhập thành công vào cổng Thuế trên trình duyệt, bấm [Yes / Có] để tiếp tục tải ngay!"
+                ):
+                    return
+                self.is_session_confirmed = True
+                self.lbl_session_status.config(text="● Đã đăng nhập Cổng Thuế", foreground="#059669")
 
         from_date = self.txt_from_date.get().strip()
         to_date = self.txt_to_date.get().strip()

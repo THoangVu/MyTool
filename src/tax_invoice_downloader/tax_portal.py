@@ -47,40 +47,80 @@ class TaxPortalAutomation:
             pass
 
     def navigate_to_purchase_invoices(self, page: Page):
-        """Navigates to 'Hóa đơn điện tử mua vào' (Purchase Invoices) section."""
-        self.check_session(page)
-        logger.info("Đang điều hướng đến mục 'Hóa đơn điện tử mua vào'...")
+        """Navigates to: Tra cứu -> Tra cứu hóa đơn -> Tra cứu hóa đơn điện tử mua vào."""
+        logger.info("Đang điều hướng theo luồng: Tra cứu -> Tra cứu hóa đơn -> Tra cứu hóa đơn điện tử mua vào...")
 
         try:
-            # 1. Click menu 'Tra cứu' if needed
-            tra_cuu_menu = page.locator("text=Tra cứu").first
-            if tra_cuu_menu.is_visible(timeout=2000):
-                tra_cuu_menu.click()
-                time.sleep(0.5)
+            # 0. Check if already on the active 'mua vào' tab
+            active_tab = page.locator(".ant-tabs-tab-active:has-text('mua vào'), [role='tab'][aria-selected='true']:has-text('mua vào')").first
+            if active_tab.is_visible(timeout=1000):
+                logger.info("Đang ở sẵn giao diện 'Hóa đơn điện tử mua vào'.")
+                return
+        except Exception:
+            pass
 
-            # 2. Click submenu 'Tra cứu hóa đơn'
-            tra_cuu_hd = page.locator("a[href*='tra-cuu-hoa-don'], text=Tra cứu hóa đơn").first
-            if tra_cuu_hd.is_visible(timeout=2000):
-                tra_cuu_hd.click()
-                time.sleep(1.0)
-
-            # 3. Switch to 'Hóa đơn điện tử mua vào' tab
-            tab_mua_vao = page.locator(
-                ".ant-tabs-tab:has-text('mua vào'), "
-                "button:has-text('mua vào'), "
-                "[role='tab']:has-text('mua vào'), "
-                "text=Hóa đơn điện tử mua vào"
-            ).first
-
-            if tab_mua_vao.is_visible(timeout=3000):
-                tab_mua_vao.click()
-                logger.info("Đã chọn tab 'Hóa đơn điện tử mua vào'.")
-                time.sleep(1.0)
-            else:
-                logger.info("Tab mua vào đã được chọn hoặc không cần click lại.")
-
+        # 1. Step 1: Menu 'Tra cứu'
+        try:
+            tra_cuu_selectors = [
+                ".ant-menu-submenu:has-text('Tra cứu')",
+                "li.ant-menu-submenu:has-text('Tra cứu')",
+                "span:has-text('Tra cứu')",
+                "a:has-text('Tra cứu')",
+                "text=Tra cứu",
+            ]
+            for sel in tra_cuu_selectors:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=1000):
+                    el.hover()
+                    time.sleep(0.3)
+                    el.click()
+                    logger.info("Đã bấm menu 'Tra cứu'.")
+                    time.sleep(0.6)
+                    break
         except Exception as e:
-            logger.warning(f"Lưu ý khi điều hướng menu (có thể người dùng đã ở sẵn trang tra cứu): {e}")
+            logger.debug(f"Bước 1 menu 'Tra cứu': {e}")
+
+        # 2. Step 2: Submenu 'Tra cứu hóa đơn'
+        try:
+            tra_cuu_hd_selectors = [
+                ".ant-menu-item:has-text('Tra cứu hóa đơn')",
+                "li.ant-menu-item:has-text('Tra cứu hóa đơn')",
+                "a:has-text('Tra cứu hóa đơn')",
+                "span:has-text('Tra cứu hóa đơn')",
+                "text=Tra cứu hóa đơn",
+                "a[href*='tra-cuu-hoa-don']",
+            ]
+            for sel in tra_cuu_hd_selectors:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=1500):
+                    el.click()
+                    logger.info("Đã bấm mục 'Tra cứu hóa đơn'.")
+                    time.sleep(1.2)
+                    break
+        except Exception as e:
+            logger.debug(f"Bước 2 submenu 'Tra cứu hóa đơn': {e}")
+
+        # 3. Step 3: Tab 'Tra cứu hóa đơn điện tử mua vào'
+        try:
+            mua_vao_selectors = [
+                ".ant-tabs-tab:has-text('mua vào')",
+                "div:has-text('Tra cứu hóa đơn điện tử mua vào')",
+                "span:has-text('Tra cứu hóa đơn điện tử mua vào')",
+                "button:has-text('Tra cứu hóa đơn điện tử mua vào')",
+                "[role='tab']:has-text('mua vào')",
+                "text=Tra cứu hóa đơn điện tử mua vào",
+                "text=Hóa đơn điện tử mua vào",
+                ".ant-tabs-tab:nth-child(2)",
+            ]
+            for sel in mua_vao_selectors:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=2000):
+                    el.click()
+                    logger.info("Đã chọn tab 'Tra cứu hóa đơn điện tử mua vào'.")
+                    time.sleep(1.0)
+                    break
+        except Exception as e:
+            logger.warning(f"Bước 3 chọn tab mua vào: {e}")
 
     def apply_filters_and_search(self, page: Page, from_date: str = "", to_date: str = ""):
         """Sets date filter inputs and triggers search button."""

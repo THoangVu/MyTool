@@ -108,29 +108,58 @@ class BrowserSessionManager:
         try:
             url = p.url.lower()
 
-            # Check if clearly on login screen
-            if "dang-nhap" in url or "login" in url:
-                return False, "Đang ở trang đăng nhập. Vui lòng nhập tài khoản và giải mã CAPTCHA."
+            # 1. Check if definitely logged in by URL
+            if "/tra-cuu" in url or "/hoa-don" in url or "/quan-ly" in url:
+                return True, "Đã đăng nhập thành công (đang ở trang tra cứu)"
 
-            # Check if password input is visible (login modal open)
+            # 2. Check for authenticated menus or tabs
+            authenticated_selectors = [
+                "text=Tra cứu hóa đơn",
+                "text=Hóa đơn điện tử mua vào",
+                "text=Tra cứu hóa đơn điện tử mua vào",
+                "text=Đăng xuất",
+                ".ant-dropdown-link",
+                ".user-info",
+                "a[href*='tra-cuu']",
+            ]
+            for sel in authenticated_selectors:
+                try:
+                    if p.locator(sel).first.is_visible(timeout=800):
+                        return True, "Đã đăng nhập thành công (tìm thấy menu Tra cứu / Đăng xuất)"
+                except Exception:
+                    pass
+
+            # 3. Check browser localStorage / sessionStorage for JWT / auth tokens
+            try:
+                has_auth_token = p.evaluate("""() => {
+                    try {
+                        const items = { ...localStorage, ...sessionStorage };
+                        for (const [k, v] of Object.entries(items)) {
+                            const key = k.toLowerCase();
+                            const val = typeof v === 'string' ? v.toLowerCase() : '';
+                            if (key.includes('token') || key.includes('auth') || key.includes('user') || key.includes('mst') || val.includes('bearer')) {
+                                if (v && v.length > 5) return true;
+                            }
+                        }
+                    } catch (e) {}
+                    return false;
+                }""")
+                if has_auth_token:
+                    return True, "Đã đăng nhập thành công (tìm thấy phiên làm việc)"
+            except Exception:
+                pass
+
+            # 4. Check if password input is currently visible (login modal is open)
             pwd_input = p.locator("input[type='password']").first
-            if pwd_input.is_visible(timeout=1000):
+            if pwd_input.is_visible(timeout=500):
                 return False, "Cửa sổ đăng nhập đang mở. Vui lòng hoàn thành đăng nhập và giải CAPTCHA."
 
-            # Check for definitive logged-in indicators: logout button or user greeting
-            if p.locator("text=Đăng xuất").first.is_visible(timeout=1000):
-                return True, "Đã đăng nhập thành công (tìm thấy nút Đăng xuất)"
+            # 5. Check if user is on the guest homepage
+            if p.locator("button:has-text('Đăng nhập')").first.is_visible(timeout=500):
+                return False, "Chưa đăng nhập. Vui lòng bấm 'Đăng nhập' trên cổng Thuế và xác thực."
 
-            # Check for login button on page header
-            login_btn = p.locator("button:has-text('Đăng nhập'), a:has-text('Đăng nhập'), .ant-btn:has-text('Đăng nhập')").first
-            if login_btn.is_visible(timeout=1000):
-                return False, "Chưa đăng nhập. Vui lòng bấm 'Đăng nhập' trên trang thuế và xác thực."
-
-            # Check if Tra cứu menu is available in logged-in state (user dropdown present)
-            if p.locator(".ant-dropdown-link, .user-info, .ant-avatar").first.is_visible(timeout=1000):
-                return True, "Đã đăng nhập thành công"
-
-            return False, "Chưa xác nhận trạng thái đăng nhập. Vui lòng kiểm tra lại trên trình duyệt."
+            # Default: if on portal without login form, allow with warning
+            return True, "Phiên trình duyệt đang mở"
 
         except Exception as e:
             logger.debug(f"Lỗi kiểm tra session: {e}")
