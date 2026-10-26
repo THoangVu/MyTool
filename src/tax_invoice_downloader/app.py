@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+import queue
 import subprocess
 import threading
 from pathlib import Path
@@ -23,6 +24,40 @@ ALLINVOICE_DIR = BASE_DIR / "ALLINVOICE"
 OUTPUT_DIR = BASE_DIR / "output"
 
 
+class BrowserWorker:
+    """Dedicated background worker thread for all Playwright operations.
+    Playwright Sync API requires all calls to run on the exact same thread that
+    initialized sync_playwright() to avoid TargetClosedError / greenlet thread errors.
+    """
+
+    def __init__(self):
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self._thread.start()
+
+    def _worker_loop(self):
+        while True:
+            task = self._queue.get()
+            if task is None:
+                break
+            func, args, kwargs, callback, errback = task
+            try:
+                result = func(*args, **kwargs)
+                if callback:
+                    callback(result)
+            except Exception as e:
+                if errback:
+                    errback(e)
+            finally:
+                self._queue.task_done()
+
+    def submit(self, func, *args, callback=None, errback=None, **kwargs):
+        self._queue.put((func, args, kwargs, callback, errback))
+
+    def stop(self):
+        self._queue.put(None)
+
+
 class TaxInvoiceApp(tk.Tk):
     """Main Desktop UI for Tax Invoice Downloader."""
 
@@ -41,8 +76,8 @@ class TaxInvoiceApp(tk.Tk):
         self.download_manager = DownloadManager(manifest_db=self.manifest_db)
         self.browser_manager = BrowserSessionManager()
         self.automation = TaxPortalAutomation(download_manager=self.download_manager)
+        self.browser_worker = BrowserWorker()
 
-        self.worker_thread: Optional[threading.Thread] = None
         self.is_running = False
         self.is_session_confirmed = False
 
@@ -311,157 +346,151 @@ class TaxInvoiceApp(tk.Tk):
         self.lbl_stat_errors.config(text=f"Lỗi: {stats.so_loi}")
 
     def _open_browser_action(self):
-        """Launches browser with persistent context in a thread."""
-        def run_open():
-            try:
-                self.lbl_session_status.config(text="Đang mở trình duyệt...", foreground="#D97706")
-                page = self.browser_manager.launch_browser(headless=False)
-                logged_in, msg = self.browser_manager.check_login_status(page)
-                if logged_in:
-                    self.lbl_session_status.config(text="● Đã đăng nhập Cổng Thuế", foreground="#059669")
-                else:
-                    self.lbl_session_status.config(text=f"● {msg}", foreground="#D97706")
-            except Exception as e:
-                self.lbl_session_status.config(text=f"Lỗi mở trình duyệt: {e}", foreground="#DC2626")
-                messagebox.showerror("Lỗi", f"Không thể mở trình duyệt: {e}")
+        """Launches browser with persistent context via dedicated browser worker thread."""
+        self.lbl_session_status.config(text="Đang mở trình duyệt...", foreground="#D97706")
+        self.btn_open_browser.config(state=tk.DISABLED)
 
-        threading.Thread(target=run_open, daemon=True).start()
+        def _task():
+            page = self.browser_manager.launch_browser(headless=False)
+            logged_in, msg = self.browser_manager.check_login_status(page)
+            return logged_in, msg
+
+        def _success(result):
+            self.btn_open_browser.config(state=tk.NORMAL)
+            logged_in, msg = result
+            if logged_in:
+                self.lbl_session_status.config(text="● Đã đăng nhập Cổng Thuế", foreground="#059669")
+            else:
+                self.lbl_session_status.config(text=f"● {msg}", foreground="#D97706")
+
+        def _error(err):
+            self.btn_open_browser.config(state=tk.NORMAL)
+            self.lbl_session_status.config(text=f"Lỗi mở trình duyệt: {err}", foreground="#DC2626")
+            messagebox.showerror("Lỗi", f"Không thể mở trình duyệt: {err}")
+
+        self.browser_worker.submit(_task, callback=lambda res: self.after(0, _success, res), errback=lambda e: self.after(0, _error, e))
 
     def _check_login_action(self):
-        """Checks login status of active page."""
-        try:
-            page = self.browser_manager.page
+        """Checks login status of active page via dedicated browser worker thread."""
+        def _task():
+            pages = self.browser_manager.context.pages if self.browser_manager.context else []
+            page = pages[-1] if pages else self.browser_manager.page
             if not page:
-                messagebox.showinfo("Thông báo", "Vui lòng bấm '1. Mở Cổng Thuế' trước.")
-                return
-            logged_in, msg = self.browser_manager.check_login_status(page)
+                return False, "Trình duyệt chưa mở. Vui lòng bấm '1. Mở Cổng Thuế' trước."
+            return self.browser_manager.check_login_status(page)
+
+        def _success(result):
+            logged_in, msg = result
             if logged_in:
                 self.lbl_session_status.config(text="● Đã đăng nhập Cổng Thuế", foreground="#059669")
                 messagebox.showinfo("Thành công", "Phiên đăng nhập hợp lệ! Bạn có thể bắt đầu tải hóa đơn.")
             else:
                 self.lbl_session_status.config(text=f"● {msg}", foreground="#D97706")
                 messagebox.showwarning("Chưa đăng nhập", msg)
-        except Exception as e:
-            messagebox.showerror("Lỗi", f"Lỗi kiểm tra phiên: {e}")
+
+        def _error(err):
+            self.lbl_session_status.config(text=f"Lỗi kiểm tra phiên: {err}", foreground="#DC2626")
+            messagebox.showerror("Lỗi", f"Lỗi kiểm tra phiên: {err}")
+
+        self.browser_worker.submit(_task, callback=lambda res: self.after(0, _success, res), errback=lambda e: self.after(0, _error, e))
 
     def _confirm_login_action(self):
         """Allows user to manually confirm login as specified in SPEC section 6."""
         self.is_session_confirmed = True
         self.lbl_session_status.config(text="● Đã xác nhận đăng nhập Cổng Thuế", foreground="#059669")
-        self.lbl_status.config(text="Sẵn sàng! Bấm '2. Bắt đầu tải XML hóa đơn' để tiến hành tải.")
+        self.lbl_status.config(text="Sẵn sàng! Hãy vào 'Tra cứu hóa đơn mua vào', tìm kiếm và bấm '2. Bắt đầu tải XML hóa đơn'.")
         messagebox.showinfo(
             "Đã xác nhận",
-            "Đã xác nhận phiên đăng nhập thành công!\n\nBạn có thể bấm '2. Bắt đầu tải XML hóa đơn' để tải tự động."
+            "Đã xác nhận phiên đăng nhập thành công!\n\n"
+            "Tiếp theo trên trình duyệt:\n"
+            "1. Vào: Tra cứu ➔ Tra cứu hóa đơn ➔ Hóa đơn mua vào\n"
+            "2. Chọn khoảng ngày & bấm 'Tìm kiếm'\n"
+            "3. Khi bảng kết quả hiện ra, bấm '2. Bắt đầu tải XML hóa đơn' trên Tool!"
         )
 
     def _start_download_action(self):
-        """Starts automated invoice downloading from the active table currently displayed on screen."""
+        """Starts automated invoice downloading from the active table on the browser worker thread."""
         if self.is_running:
             return
-
-        # Ensure active browser page
-        if not self.browser_manager.context or not self.browser_manager.context.pages:
-            messagebox.showinfo(
-                "Chưa mở trình duyệt",
-                "Trình duyệt chưa được mở.\n\nVui lòng bấm '🌐 1. Mở Cổng Thuế' trước, sau đó tự đăng nhập và tìm kiếm danh sách hóa đơn."
-            )
-            return
-
-        # Search for the page that contains invoice table or is tax portal
-        pages = self.browser_manager.context.pages
-        target_page = None
-        for p in reversed(pages):
-            try:
-                if self.automation._get_table_rows(p).count() > 0:
-                    target_page = p
-                    break
-            except Exception:
-                pass
-
-        if not target_page:
-            for p in reversed(pages):
-                if "gdt.gov.vn" in p.url:
-                    target_page = p
-                    break
-
-        if not target_page:
-            target_page = pages[-1]
-
-        page = target_page
-        self.browser_manager._page = page
-
-        # Quick check if table is visible on the current page
-        try:
-            rows = self.automation._get_table_rows(page)
-            if rows.count() == 0:
-                if not messagebox.askyesno(
-                    "Chưa thấy bảng hóa đơn",
-                    "Hiện tại chưa thấy danh sách hóa đơn hiển thị trên trình duyệt.\n\n"
-                    "Bạn đã thao tác trên web:\n"
-                    "1. Vào: Tra cứu ➔ Tra cứu hóa đơn ➔ Hóa đơn mua vào\n"
-                    "2. Đã bấm nút 'Tìm kiếm' để bảng hiện ra chưa?\n\n"
-                    "Nếu bảng đã hiện ra, bấm [Yes / Có] để tiếp tục tải ngay!"
-                ):
-                    return
-        except Exception:
-            pass
 
         try:
             delay = float(self.delay_spin.get())
         except ValueError:
             delay = 1.0
-        self.automation.polite_delay_seconds = delay
 
         self.is_running = True
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         self.progress_bar.start(10)
-        self.lbl_status.config(text="Đang bắt đầu quét bảng và tải hóa đơn...")
+        self.lbl_status.config(text="Đang kết nối danh sách hóa đơn trên trình duyệt...")
 
-        self.worker_thread = threading.Thread(
-            target=self._worker_download_loop,
-            args=(page,),
-            daemon=True
-        )
-        self.worker_thread.start()
+        def _download_task():
+            if not self.browser_manager.context or not self.browser_manager.context.pages:
+                raise RuntimeError(
+                    "Trình duyệt chưa được kết nối.\n\nVui lòng bấm '🌐 1. Mở Cổng Thuế' trước, sau đó đăng nhập và tìm kiếm danh sách hóa đơn."
+                )
 
-    def _worker_download_loop(self, page):
-        try:
-            logger.info("Bắt đầu duyệt và tải hóa đơn từ bảng kết quả trên trình duyệt...")
+            # Search for page that has the invoice table or tax portal
+            pages = self.browser_manager.context.pages
+            target_page = None
+            for p in reversed(pages):
+                try:
+                    if self.automation._get_table_rows(p).count() > 0:
+                        target_page = p
+                        break
+                except Exception:
+                    pass
 
-            # Process all invoices directly from the current table
+            if not target_page:
+                for p in reversed(pages):
+                    if "gdt.gov.vn" in p.url:
+                        target_page = p
+                        break
+
+            if not target_page:
+                target_page = pages[-1]
+
+            self.automation.polite_delay_seconds = delay
+
             def on_progress(current, total, status_text):
                 self.after(0, lambda: self.lbl_status.config(text=f"Tiến độ: [{current}/{total}] {status_text}"))
                 stats = self.manifest_db.get_summary_stats()
                 self.after(0, lambda: self._update_stats_display(stats))
 
-            stats = self.automation.run_download_all(page, progress_callback=on_progress)
+            return self.automation.run_download_all(target_page, progress_callback=on_progress)
 
-            # Refresh table
-            self.after(0, self._refresh_history_table)
-            self.after(0, lambda: messagebox.showinfo(
+        def _on_success(stats):
+            self._cleanup_download_ui()
+            self._refresh_history_table()
+            messagebox.showinfo(
                 "Hoàn thành",
                 f"Đã hoàn thành lượt tải hóa đơn!\n"
                 f"- Số XML thành công: {stats.so_xml_thanh_cong}\n"
                 f"- Số bỏ qua (đã có): {stats.so_bo_qua}\n"
                 f"- Số lỗi: {stats.so_loi}\n\n"
                 f"Bạn có thể bấm 'Xuất Excel Tổng Hợp' để xem báo cáo đối chiếu."
-            ))
+            )
 
-        except SessionExpiredError as e:
-            self.after(0, lambda: messagebox.showwarning("Hết phiên", str(e)))
-            self.after(0, lambda: self.lbl_session_status.config(text="● Phiên hết hạn, cần đăng nhập lại", foreground="#DC2626"))
-        except Exception as e:
-            logger.error(f"Lỗi trong quá trình chạy tự động: {e}", exc_info=True)
-            self.after(0, lambda: messagebox.showerror("Lỗi", f"Đã xảy ra lỗi: {e}"))
-        finally:
-            self.is_running = False
-            self.after(0, self._on_worker_finished)
+        def _on_error(err):
+            self._cleanup_download_ui()
+            if isinstance(err, SessionExpiredError):
+                self.lbl_session_status.config(text="● Phiên hết hạn, cần đăng nhập lại", foreground="#DC2626")
+                messagebox.showwarning("Hết phiên", str(err))
+            else:
+                logger.error(f"Lỗi trong quá trình tải: {err}", exc_info=True)
+                messagebox.showerror("Thông báo", str(err))
 
-    def _on_worker_finished(self):
-        self.progress_bar.stop()
+        self.browser_worker.submit(
+            _download_task,
+            callback=lambda res: self.after(0, _on_success, res),
+            errback=lambda e: self.after(0, _on_error, e)
+        )
+
+    def _cleanup_download_ui(self):
+        self.is_running = False
         self.btn_start.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
+        self.progress_bar.stop()
         self.lbl_status.config(text="Sẵn sàng.")
         stats = self.manifest_db.get_summary_stats()
         self._update_stats_display(stats)
@@ -529,10 +558,14 @@ class TaxInvoiceApp(tk.Tk):
                 return
             self.automation.request_stop()
 
-        try:
-            self.browser_manager.close()
-        except Exception:
-            pass
+        def _close_task():
+            try:
+                self.browser_manager.close()
+            except Exception:
+                pass
+
+        self.browser_worker.submit(_close_task)
+        self.browser_worker.stop()
         self.destroy()
 
 

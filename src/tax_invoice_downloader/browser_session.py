@@ -43,9 +43,21 @@ class BrowserSessionManager:
 
     def launch_browser(self, headless: bool = False) -> Page:
         """Launches Chromium with persistent profile to preserve cookies/session."""
-        if self._page and not self._page.is_closed():
-            logger.info("Trình duyệt đã mở sẵn.")
+        is_alive = False
+        if self._context and self._page:
+            try:
+                # Test whether connection is truly active and responsive
+                _ = self._page.url
+                is_alive = not self._page.is_closed()
+            except Exception:
+                is_alive = False
+
+        if is_alive:
+            logger.info("Trình duyệt đã mở sẵn và đang hoạt động.")
             return self._page
+
+        # Clean up any dead handles
+        self.close()
 
         logger.info(f"Đang mở trình duyệt với hồ sơ: {self.profile_dir} (headless={headless})")
         self._playwright = sync_playwright().start()
@@ -102,12 +114,17 @@ class BrowserSessionManager:
         Returns (is_logged_in, status_description).
         """
         p = page or self._page
-        if not p or p.is_closed():
-            return False, "Trình duyệt chưa mở"
+        if not p:
+            return False, "Trình duyệt chưa mở. Vui lòng bấm '1. Mở Cổng Thuế' trước."
 
         try:
+            if p.is_closed():
+                return False, "Trang trình duyệt đã bị đóng. Vui lòng bấm '1. Mở Cổng Thuế' để mở lại."
             url = p.url.lower()
+        except Exception:
+            return False, "Trình duyệt chưa sẵn sàng hoặc đã bị đóng. Vui lòng bấm '1. Mở Cổng Thuế' để mở lại."
 
+        try:
             # 1. Check if definitely logged in by URL
             if "/tra-cuu" in url or "/hoa-don" in url or "/quan-ly" in url:
                 return True, "Đã đăng nhập thành công (đang ở trang tra cứu)"
