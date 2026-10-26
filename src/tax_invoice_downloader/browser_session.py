@@ -75,7 +75,26 @@ class BrowserSessionManager:
             except Exception as e:
                 logger.warning(f"Không thể mở tự động trang chủ (người dùng có thể tải lại): {e}")
 
+        # Dismiss initial announcement modal if present
+        self.dismiss_announcement_modal(self._page)
+
         return self._page
+
+    def dismiss_announcement_modal(self, page: Optional[Page] = None):
+        """Dismisses the startup notice/announcement popup modal from the Tax department if present."""
+        p = page or self._page
+        if not p or p.is_closed():
+            return
+        try:
+            # Check for notification modal
+            notice_modal = p.locator(".ant-modal:has-text('THÔNG BÁO'), .ant-modal:has-text('Thông báo')").first
+            if notice_modal.is_visible(timeout=2500):
+                close_btn = notice_modal.locator(".ant-modal-close, button:has-text('Đóng'), button:has-text('OK')").first
+                if close_btn.is_visible(timeout=1000):
+                    close_btn.click()
+                    logger.info("Đã tự động đóng cửa sổ Thông báo ban đầu của Cục Thuế.")
+        except Exception as e:
+            logger.debug(f"Không có modal thông báo cần đóng: {e}")
 
     def check_login_status(self, page: Optional[Page] = None) -> Tuple[bool, str]:
         """Checks whether user is currently logged into the tax portal.
@@ -91,28 +110,27 @@ class BrowserSessionManager:
 
             # Check if clearly on login screen
             if "dang-nhap" in url or "login" in url:
-                return False, "Đang ở trang đăng nhập. Vui lòng đăng nhập và giải mã CAPTCHA."
+                return False, "Đang ở trang đăng nhập. Vui lòng nhập tài khoản và giải mã CAPTCHA."
 
-            # Check for logged-in indicators: menu 'Tra cứu', user avatar/MST dropdown, or logout button
-            logged_in_selectors = [
-                "text=Tra cứu",
-                "text=Đăng xuất",
-                "text=Hóa đơn",
-                ".ant-dropdown-link",
-                ".user-info",
-                "a[href*='tra-cuu']",
-            ]
-            for sel in logged_in_selectors:
-                if p.locator(sel).first.is_visible(timeout=1000):
-                    return True, "Đã đăng nhập thành công"
+            # Check if password input is visible (login modal open)
+            pwd_input = p.locator("input[type='password']").first
+            if pwd_input.is_visible(timeout=1000):
+                return False, "Cửa sổ đăng nhập đang mở. Vui lòng hoàn thành đăng nhập và giải CAPTCHA."
 
-            # Check for login inputs
-            login_form = p.locator("input[type='password']").first
-            if login_form.is_visible(timeout=1000):
-                return False, "Cần đăng nhập tài khoản và xác thực"
+            # Check for definitive logged-in indicators: logout button or user greeting
+            if p.locator("text=Đăng xuất").first.is_visible(timeout=1000):
+                return True, "Đã đăng nhập thành công (tìm thấy nút Đăng xuất)"
 
-            # If on the portal but not logged in
-            return False, "Chưa xác nhận trạng thái đăng nhập. Vui lòng đăng nhập nếu chưa hoàn tất."
+            # Check for login button on page header
+            login_btn = p.locator("button:has-text('Đăng nhập'), a:has-text('Đăng nhập'), .ant-btn:has-text('Đăng nhập')").first
+            if login_btn.is_visible(timeout=1000):
+                return False, "Chưa đăng nhập. Vui lòng bấm 'Đăng nhập' trên trang thuế và xác thực."
+
+            # Check if Tra cứu menu is available in logged-in state (user dropdown present)
+            if p.locator(".ant-dropdown-link, .user-info, .ant-avatar").first.is_visible(timeout=1000):
+                return True, "Đã đăng nhập thành công"
+
+            return False, "Chưa xác nhận trạng thái đăng nhập. Vui lòng kiểm tra lại trên trình duyệt."
 
         except Exception as e:
             logger.debug(f"Lỗi kiểm tra session: {e}")
