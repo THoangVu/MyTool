@@ -105,10 +105,20 @@ class ManifestDB:
             if sh_hoa_don:
                 clean_sh = "".join(c for c in sh_hoa_don if c.isdigit())
                 clean_kh = "".join(c for c in kh_hoa_don if c.isalnum() or c in ("-", "_"))
+                sh_lstrip = clean_sh.lstrip('0') or "0"
+                sh_variants = [clean_sh, clean_sh.zfill(8), sh_lstrip]
+                placeholders = ",".join("?" for _ in sh_variants)
                 if clean_kh:
                     cursor.execute(
-                        "SELECT status FROM invoice_manifest WHERE (sh_hoa_don = ? OR sh_hoa_don = ?) AND kh_hoa_don = ? AND status IN ('XML_EXTRACTED', 'EXPORTED')",
-                        (clean_sh, clean_sh.zfill(8), clean_kh)
+                        f"SELECT status FROM invoice_manifest WHERE (sh_hoa_don IN ({placeholders}) OR ltrim(sh_hoa_don, '0') = ?) AND (kh_hoa_don = ? OR kh_hoa_don LIKE ?) AND status IN ('XML_EXTRACTED', 'EXPORTED')",
+                        (*sh_variants, sh_lstrip, clean_kh, f"%{clean_kh}%")
+                    )
+                    if cursor.fetchone():
+                        return True
+                else:
+                    cursor.execute(
+                        f"SELECT status FROM invoice_manifest WHERE (sh_hoa_don IN ({placeholders}) OR ltrim(sh_hoa_don, '0') = ?) AND status IN ('XML_EXTRACTED', 'EXPORTED')",
+                        (*sh_variants, sh_lstrip)
                     )
                     if cursor.fetchone():
                         return True

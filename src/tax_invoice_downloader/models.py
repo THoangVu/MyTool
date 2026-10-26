@@ -13,22 +13,32 @@ class InvoiceKey:
     sh_hoa_don: str = ""
     ngay_lap: str = ""
 
+    def _format_date(self) -> str:
+        raw = self.ngay_lap.strip()
+        if "/" in raw:
+            parts = raw.split("/")
+            if len(parts) == 3 and len(parts[2]) == 4:
+                return f"{parts[2]}{parts[1].zfill(2)}{parts[0].zfill(2)}"
+        elif "-" in raw:
+            parts = raw.split("-")
+            if len(parts) == 3 and len(parts[0]) == 4:
+                return f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}"
+        digits = "".join(c for c in raw if c.isdigit())
+        return digits[:8] if len(digits) >= 8 else digits
+
     def normalized_key(self) -> str:
         clean_mst = "".join(c for c in self.mst_nguoi_ban.strip() if c.isalnum() or c == "-")
         clean_kh = "".join(c for c in self.kh_hoa_don.strip() if c.isalnum() or c in ("-", "_"))
-        clean_sh = "".join(c for c in self.sh_hoa_don.strip() if c.isdigit())
-        clean_date = "".join(c for c in self.ngay_lap.strip() if c.isdigit())
+        clean_sh = "".join(c for c in self.sh_hoa_don.strip() if c.isdigit()).zfill(8)
+        clean_date = self._format_date()
         return f"{clean_mst}_{clean_kh}_{clean_sh}_{clean_date}"
 
     def to_xml_filename(self) -> str:
         """Standard filename: {MST_NGUOI_BAN}_{KY_HIEU}_{SO_HOA_DON}_{NGAY_LAP}.xml"""
         clean_mst = "".join(c for c in self.mst_nguoi_ban.strip() if c.isalnum() or c == "-")
         clean_kh = "".join(c for c in self.kh_hoa_don.strip() if c.isalnum() or c in ("-", "_"))
-        clean_sh = "".join(c for c in self.sh_hoa_don.strip() if c.isalnum())
-        # Format date as YYYYMMDD
-        clean_date = "".join(c for c in self.ngay_lap.strip() if c.isdigit())
-        if len(clean_date) > 8:
-            clean_date = clean_date[:8]
+        clean_sh = "".join(c for c in self.sh_hoa_don.strip() if c.isalnum()).zfill(8)
+        clean_date = self._format_date()
         return f"{clean_mst}_{clean_kh}_{clean_sh}_{clean_date}.xml"
 
 

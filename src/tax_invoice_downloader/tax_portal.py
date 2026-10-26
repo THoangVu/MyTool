@@ -238,49 +238,53 @@ class TaxPortalAutomation:
             "tong_tien": "",
         }
 
-        # 1. Use column mapping if detected
-        if col_map:
-            for field, idx in col_map.items():
-                if idx < cell_count:
-                    data[field] = cell_texts[idx]
+        # Check if first cell is empty checkbox column
+        offset = 1 if (cell_count > 7 and not cell_texts[0]) else 0
 
-        # 2. Positional fallback if primary fields still missing
-        if not data["sh_hoa_don"] and cell_count >= 5:
-            # Check if first cell is checkbox column
-            offset = 1 if (cell_count > 6 and not cell_texts[0]) else 0
-            if cell_count > offset + 4:
-                data["stt"] = cell_texts[offset]
-                data["kh_mau_so"] = cell_texts[offset + 1]
-                data["kh_hoa_don"] = cell_texts[offset + 2]
-                data["sh_hoa_don"] = cell_texts[offset + 3].strip()
-                data["ngay_lap"] = cell_texts[offset + 4].strip()
+        # Exact column layout on Cổng Thuế (Tra cứu hóa đơn mua vào):
+        # [0] STT (e.g. 1, 2, 3)
+        # [1] Mã số thuế người mua (e.g. 060176009807)
+        # [2] Ký hiệu mẫu số (e.g. 1)
+        # [3] Ký hiệu hóa đơn (e.g. C26TNT)
+        # [4] Số hóa đơn (e.g. 5286)
+        # [5] Ngày lập (e.g. 09/10/2026)
+        # [6] Thông tin người bán (e.g. MST người bán: 3400401523\nTên người bán: ...)
+        if cell_count > offset + 5:
+            data["stt"] = cell_texts[offset]
+            data["mst_nguoi_mua"] = cell_texts[offset + 1]
+            data["kh_mau_so"] = cell_texts[offset + 2]
+            data["kh_hoa_don"] = cell_texts[offset + 3]
+            data["sh_hoa_don"] = cell_texts[offset + 4].strip()
+            data["ngay_lap"] = cell_texts[offset + 5].strip()
 
-        # 3. Pattern-matching fallback across all cells for critical fields
+        if cell_count > offset + 6:
+            data["thong_tin_nguoi_ban"] = cell_texts[offset + 6]
+            mst_m = re.search(r"\b\d{10}(?:-\d{3})?\b", cell_texts[offset + 6])
+            if mst_m:
+                data["mst_nguoi_ban"] = mst_m.group(0)
+
+        # Regex fallback to verify and correct any misaligned columns
         for txt in cell_texts:
-            # Match Date (DD/MM/YYYY)
-            if not data["ngay_lap"] and re.search(r"\b\d{2}/\d{2}/\d{4}\b", txt):
-                data["ngay_lap"] = re.search(r"\b\d{2}/\d{2}/\d{4}\b", txt).group(0)
+            # 1. Date: DD/MM/YYYY
+            if "/" in txt:
+                d_m = re.search(r"\b\d{2}/\d{2}/\d{4}\b", txt)
+                if d_m:
+                    data["ngay_lap"] = d_m.group(0)
 
-            # Match MST (10 or 13-14 digits)
-            if not data["mst_nguoi_ban"] and re.search(r"\b\d{10}(?:-\d{3})?\b", txt):
-                data["mst_nguoi_ban"] = re.search(r"\b\d{10}(?:-\d{3})?\b", txt).group(0)
+            # 2. Invoice symbol: e.g. C26TNT, 1C23TYY
+            s_m = re.search(r"\b[1-9]?[A-Z]\d{2}[A-Z0-9]{2,4}\b", txt)
+            if s_m:
+                data["kh_hoa_don"] = s_m.group(0)
 
-            # Match Invoice Symbol (e.g. C26TNT, 1C23TLL)
-            if not data["kh_hoa_don"] and re.search(r"\b[1-9]?[A-Z]\d{2}[A-Z0-9]{2,4}\b", txt):
-                data["kh_hoa_don"] = re.search(r"\b[1-9]?[A-Z]\d{2}[A-Z0-9]{2,4}\b", txt).group(0)
+            # 3. Seller tax code: 10 or 13-14 digits
+            if not data["mst_nguoi_ban"]:
+                mst_m = re.search(r"\b\d{10}(?:-\d{3})?\b", txt)
+                if mst_m and mst_m.group(0) != data["mst_nguoi_mua"]:
+                    data["mst_nguoi_ban"] = mst_m.group(0)
 
         # Clean invoice number
         if data["sh_hoa_don"]:
             data["sh_hoa_don"] = "".join(c for c in data["sh_hoa_don"] if c.isdigit())
-
-        # Inspect data-row-key attribute if present
-        row_key = row.get_attribute("data-row-key") or ""
-        if row_key and not data["mst_nguoi_ban"]:
-            parts = row_key.split("_")
-            for part in parts:
-                if re.match(r"^\d{10}(?:-\d{3})?$", part):
-                    data["mst_nguoi_ban"] = part
-                    break
 
         return data
 
@@ -310,9 +314,9 @@ class TaxPortalAutomation:
     ) -> Optional[InvoiceHeader]:
         """Executes the download workflow for a single invoice row:
 
-        1. Clicks the row and ensures selection without unchecking.
-        2. Finds and triggers the download button (toolbar, row action, or detail modal).
-        3. Intercepts ZIP download and processes it.
+        1. Clicks the row to select it.
+        2. Opens invoice detail modal and clicks XML download button.
+        3. Intercepts ZIP download and processes it into ALLINVOICE/.
         """
         expected_key = InvoiceKey(
             mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
@@ -325,63 +329,59 @@ class TaxPortalAutomation:
 
         for attempt in range(retry_limit + 1):
             try:
-                # 1. Click specifically on the first cell of the row (STT / Số HĐ)
-                # This highlights and selects the row cleanly without ever clicking links in other columns
+                # 1. Click on the row to highlight/select it
                 row.scroll_into_view_if_needed(timeout=3000)
                 time.sleep(0.3)
-
-                cells = row.locator("td")
-                if cells.count() >= 2:
-                    cells.nth(0).click()
-                else:
-                    row.click()
-
+                row.click()
                 logger.debug(f"Đã click chọn dòng hóa đơn số {expected_key.sh_hoa_don}")
                 time.sleep(0.5)
 
-                # 2. Find the exact 'Xuất hóa đơn' (Xuất XML) button on the toolbar
-                # Uses the exact SVG ID #icon_ketxuat / #clip-icon_ketxuat provided from actual portal HTML
+                # 2. Check if detail modal is already open, or open it
                 download_button = None
-                exact_selectors = [
-                    "button:has(#icon_ketxuat)",
-                    "button:has(#clip-icon_ketxuat)",
-                    "button:has(#Path_53113)",
-                    "button:has(#Path_53114)",
-                    "button:has([id*='ketxuat'])",
-                    ".ant-btn:has(#icon_ketxuat)",
-                    ".ant-btn:has(#clip-icon_ketxuat)",
-                    ".ant-btn:has(#Path_53113)",
-                    "button.ButtonAnt__IconButton-sc-p5q16s-1:has(svg [id*='ketxuat'])",
-                    "button.ButtonAnt__IconButton-sc-p5q16s-1:has(#icon_ketxuat)",
-                    "button[title*='Xuất xml']",
-                    "button[title*='Xuất XML']",
+                modal_selectors = [
+                    ".ant-modal button:has-text('Tải về')",
+                    ".ant-modal button:has-text('Tải hóa đơn')",
+                    ".ant-modal button:has-text('Tải XML')",
+                    ".ant-modal button:has-text('Xuất XML')",
+                    ".ant-modal button:has-text('XML')",
+                    ".ant-modal a:has-text('Tải về')",
+                    ".ant-modal a:has-text('Tải XML')",
+                    ".ant-modal a:has-text('XML')",
+                    ".ant-modal .ant-btn-primary:has-text('Tải')",
                 ]
-
-                for sel in exact_selectors:
+                for sel in modal_selectors:
                     btn = page.locator(sel).first
-                    if btn.is_visible(timeout=500):
+                    if btn.is_visible(timeout=300):
                         download_button = btn
                         break
 
-                # Priority 2: 4th icon-only button in the toolbar group above table
                 if not download_button:
-                    icon_btns = page.locator(".ant-btn-icon-only, .ButtonAnt__IconButton-sc-p5q16s-1")
-                    count = icon_btns.count()
-                    if count >= 4:
-                        cand = icon_btns.nth(3)
-                        if cand.is_visible(timeout=300):
-                            download_button = cand
+                    # Open detail modal via Eye icon (Xem hóa đơn) or double-clicking the row
+                    view_btn = page.locator(
+                        ".ant-btn:has(.anticon-eye), button:has-text('Xem hóa đơn'), button:has-text('Xem chi tiết')"
+                    ).first
+                    if view_btn.is_visible(timeout=500):
+                        view_btn.click()
+                    else:
+                        row.dblclick()
 
-                # Priority 3: Fallback button selectors
+                    time.sleep(1.0)
+                    for sel in modal_selectors:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=600):
+                            download_button = btn
+                            break
+
+                # If still not found, check toolbar XML buttons
                 if not download_button:
-                    for sel in [
-                        "button:has-text('Xuất XML')",
-                        "button:has-text('Xuất xml')",
+                    toolbar_selectors = [
                         "button:has-text('Tải XML')",
+                        "button:has-text('Xuất XML')",
                         "button:has-text('Tải hóa đơn')",
+                        "button:has-text('Tải về'):not(:has-text('Tải lại'))",
                         ".ant-btn:has(.anticon-download)",
-                        ".ant-btn:has(.anticon-export)",
-                    ]:
+                    ]
+                    for sel in toolbar_selectors:
                         btn = page.locator(sel).first
                         if btn.is_visible(timeout=300):
                             download_button = btn
@@ -389,14 +389,11 @@ class TaxPortalAutomation:
 
                 if not download_button:
                     raise DownloadManagerError(
-                        f"Không tìm thấy nút 'Xuất XML' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}"
+                        f"Không tìm thấy nút tải XML cho hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
                 # 3. Intercept and trigger download
                 temp_downloads_dir = self.download_manager.downloads_dir
-
-                # Check if clicking button opens a dropdown menu (e.g. format choice: XML vs PDF)
-                dropdown_item = None
                 with page.expect_download(timeout=25000) as download_info:
                     download_button.click()
                     # Check if a dropdown menu popped up needing a sub-click
@@ -412,15 +409,23 @@ class TaxPortalAutomation:
 
                 download = download_info.value
                 suggested_filename = download.suggested_filename or "invoice.zip"
+
+                # Guard against accidental Excel download
+                if suggested_filename.lower().endswith(".xlsx") or suggested_filename.lower().endswith(".xls"):
+                    self._close_modal_if_open(page)
+                    raise DownloadManagerError(f"Cổng Thuế trả về file Excel ({suggested_filename}) thay vì ZIP XML hóa đơn")
+
                 temp_save_path = temp_downloads_dir / suggested_filename
+                if temp_save_path.exists():
+                    temp_save_path = temp_downloads_dir / f"{time.time_ns()}_{suggested_filename}"
 
                 download.save_as(str(temp_save_path))
                 logger.info(f"Đã nhận file tải về: {temp_save_path.name}")
 
-                # 4. Close any opened modal to reset UI for next row
+                # 4. Close modal to reset UI for next row
                 self._close_modal_if_open(page)
 
-                # 5. Process downloaded ZIP
+                # 5. Process downloaded ZIP into ALLINVOICE/
                 _, invoice_header = self.download_manager.process_downloaded_zip(
                     zip_path=temp_save_path,
                     expected_key=expected_key,
