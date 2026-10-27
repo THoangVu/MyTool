@@ -349,6 +349,92 @@ class TaxPortalAutomation:
 
         return None
 
+    def _select_table_row(
+        self,
+        page: Page,
+        row: Locator,
+        row_data: Dict[str, str],
+        export_btn: Optional[Locator],
+    ) -> bool:
+        """Kích hoạt chọn dòng hóa đơn cho đến khi nút 'Xuất xml' được enabled."""
+        row_key = row.get_attribute("data-row-key") or ""
+        sh_hoa_don = row_data.get("sh_hoa_don", "")
+        kh_hoa_don = row_data.get("kh_hoa_don", "")
+
+        # 1. Thử click trực tiếp vào ô có chữ nhìn thấy được (Số HĐ hoặc Ký hiệu)
+        target_cells = []
+        if sh_hoa_don:
+            target_cells.append(page.locator(f"tr td:has-text('{sh_hoa_don}')"))
+        if kh_hoa_don:
+            target_cells.append(page.locator(f"tr td:has-text('{kh_hoa_don}')"))
+        target_cells.append(row.locator("td"))
+
+        for cell_locator in target_cells:
+            count = cell_locator.count()
+            for idx in range(min(count, 5)):
+                c = cell_locator.nth(idx)
+                try:
+                    if c.is_visible(timeout=200) and c.inner_text().strip():
+                        c.click(timeout=800)
+                        time.sleep(0.25)
+                        if export_btn and export_btn.is_enabled():
+                            logger.debug(f"Đã chọn thành công dòng qua cell (text='{c.inner_text().strip()}')")
+                            return True
+                except Exception:
+                    pass
+
+        # 2. Kích hoạt sự kiện native click thông qua JavaScript trên tất cả phần tử của dòng
+        try:
+            page.evaluate("""({ key, sh }) => {
+                let targets = [];
+                if (key) {
+                    targets = Array.from(document.querySelectorAll(`tr[data-row-key="${key}"]`));
+                }
+                if (targets.length === 0 && sh) {
+                    const rows = document.querySelectorAll('tr.ant-table-row');
+                    targets = Array.from(rows).filter(r => r.innerText.includes(sh));
+                }
+                targets.forEach(tr => {
+                    tr.click();
+                    tr.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    Array.from(tr.children).forEach(td => {
+                        td.click();
+                        td.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    });
+                });
+            }""", {"key": row_key, "sh": sh_hoa_don})
+            time.sleep(0.3)
+            if export_btn and export_btn.is_enabled():
+                logger.debug(f"Đã chọn thành công dòng qua JavaScript dispatch (key={row_key})")
+                return True
+        except Exception as e:
+            logger.debug(f"JS row selection: {e}")
+
+        # 3. Thử click bảng fixed-left nếu có
+        if row_key:
+            try:
+                fixed_cells = page.locator(f".ant-table-fixed-left tr[data-row-key='{row_key}'] td")
+                for i in range(fixed_cells.count()):
+                    fc = fixed_cells.nth(i)
+                    if fc.is_visible() and fc.inner_text().strip():
+                        fc.click(timeout=600)
+                        time.sleep(0.25)
+                        if export_btn and export_btn.is_enabled():
+                            return True
+            except Exception:
+                pass
+
+        # 4. Fallback click trực tiếp vào dòng
+        try:
+            row.click(force=True)
+            time.sleep(0.25)
+            if export_btn and export_btn.is_enabled():
+                return True
+        except Exception:
+            pass
+
+        return False
+
     def download_invoice_row(
         self,
         page: Page,
@@ -373,21 +459,12 @@ class TaxPortalAutomation:
 
         for attempt in range(retry_limit + 1):
             try:
-                # 1. Cuộn đến dòng hóa đơn và click chọn dòng
-                row.scroll_into_view_if_needed(timeout=3000)
-                time.sleep(0.15)
-
-                # Click vào ô đầu tiên hoặc dòng để kích hoạt chọn dòng
+                # 1. Cuộn đến dòng hóa đơn
                 try:
-                    cells = row.locator("td")
-                    if cells.count() > 0:
-                        cells.nth(0).click()
-                    else:
-                        row.click()
+                    row.scroll_into_view_if_needed(timeout=3000)
                 except Exception:
-                    row.click()
-
-                time.sleep(0.2)
+                    pass
+                time.sleep(0.1)
 
                 # 2. Tìm nút 'Xuất xml' trên thanh công cụ
                 export_btn = self._get_export_xml_button(page)
@@ -396,27 +473,26 @@ class TaxPortalAutomation:
                         f"Không tìm thấy nút 'Xuất xml' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
-                # 3. Chờ nút 'Xuất xml' chuyển sang trạng thái ENABLED sau khi dòng được chọn
-                is_ready = False
-                for _ in range(15):  # Chờ tối đa 3 giây
-                    if export_btn.is_enabled():
-                        is_ready = True
-                        break
-                    time.sleep(0.2)
+                # 3. Kích hoạt chọn dòng hóa đơn cho đến khi nút 'Xuất xml' được kích hoạt
+                self._select_table_row(page, row, row_data, export_btn)
+
+                # 4. Chờ thêm tối đa 2s nếu cần để nút 'Xuất xml' đổi sang trạng thái ENABLED
+                is_ready = export_btn.is_enabled()
+                if not is_ready:
+                    for _ in range(10):
+                        time.sleep(0.2)
+                        if export_btn.is_enabled():
+                            is_ready = True
+                            break
 
                 if not is_ready:
-                    # Nếu nút chưa enabled, thử click lại vào dòng
-                    logger.debug("Nút Xuất xml chưa enabled, thử click lại dòng...")
-                    row.click()
-                    time.sleep(0.3)
-                    if not export_btn.is_enabled():
-                        raise DownloadManagerError(
-                            f"Nút 'Xuất xml' bị disabled sau khi chọn hóa đơn số {expected_key.sh_hoa_don}"
-                        )
+                    raise DownloadManagerError(
+                        f"Nút 'Xuất xml' vẫn bị disabled sau khi chọn hóa đơn số {expected_key.sh_hoa_don}"
+                    )
 
                 logger.debug(f"Nút 'Xuất xml' đã enabled, kích hoạt download...")
 
-                # 4. Kích hoạt và bắt sự kiện download
+                # 5. Kích hoạt và bắt sự kiện download
                 temp_downloads_dir = self.download_manager.downloads_dir
                 with page.expect_download(timeout=25000) as download_info:
                     export_btn.click()
@@ -436,7 +512,7 @@ class TaxPortalAutomation:
                     except Exception:
                         pass
 
-                # 5. Nhận và lưu file tải về
+                # 6. Nhận và lưu file tải về
                 download = download_info.value
                 suggested_filename = download.suggested_filename or "invoice.zip"
                 logger.info(f"Đã nhận file tải về: {suggested_filename}")
@@ -454,7 +530,7 @@ class TaxPortalAutomation:
                 download.save_as(str(temp_save_path))
                 logger.info(f"Đã lưu file tạm: {temp_save_path.name}")
 
-                # 6. Xử lý ZIP → trích xuất invoice.xml → lưu ALLINVOICE/
+                # 7. Xử lý ZIP → trích xuất invoice.xml → lưu ALLINVOICE/
                 _, invoice_header = self.download_manager.process_downloaded_zip(
                     zip_path=temp_save_path,
                     expected_key=expected_key,
