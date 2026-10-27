@@ -305,69 +305,47 @@ class TaxPortalAutomation:
                 return loc
         return page.locator("tr.ant-table-row")
 
-    def _find_download_button(self, page: Page, in_modal_only: bool = False) -> Optional[Locator]:
-        """Finds the download XML/ZIP button in an active modal or on the page."""
-        # 1. Search inside open modal
-        modal_selectors = [
-            ".ant-modal:visible button:has-text('Tải về')",
-            ".ant-modal:visible button:has-text('Tải hóa đơn')",
-            ".ant-modal:visible button:has-text('Tải XML')",
-            ".ant-modal:visible button:has-text('Xuất XML')",
-            ".ant-modal:visible button:has-text('Xuất tệp XML')",
-            ".ant-modal:visible button:has-text('Tải tệp XML')",
-            ".ant-modal:visible button:has-text('XML')",
-            ".ant-modal:visible button:has-text('Tải')",
-            ".ant-modal:visible a:has-text('Tải về')",
-            ".ant-modal:visible a:has-text('Tải hóa đơn')",
-            ".ant-modal:visible a:has-text('Tải XML')",
-            ".ant-modal:visible a:has-text('Xuất XML')",
-            ".ant-modal:visible a:has-text('XML')",
-            ".ant-modal:visible [title*='Tải về']",
-            ".ant-modal:visible [title*='Tải XML']",
-            ".ant-modal:visible [title*='Tải hóa đơn']",
-            ".ant-modal:visible [title*='Xuất XML']",
-            ".ant-modal:visible button:has(.anticon-download)",
-            ".ant-modal:visible a:has(.anticon-download)",
-            "div[role='dialog']:visible button:has-text('Tải về')",
-            "div[role='dialog']:visible button:has-text('Tải XML')",
-            "div[role='dialog']:visible button:has-text('Xuất XML')",
-            "div[role='dialog']:visible button:has-text('Tải')",
+    def _get_export_xml_button(self, page: Page) -> Optional[Locator]:
+        """Định vị chính xác nút 'Xuất xml' trên thanh công cụ bảng."""
+        # 1. Định danh chính xác nhất theo SVG Path do Cổng Thuế định nghĩa
+        exact_selectors = [
+            "button:has(#Path_53113)",
+            "button:has(#Path_53114)",
+            "button:has([data-name='Path 53113'])",
+            "button:has([data-name='Path 53114'])",
+            "button.ButtonAnt__IconButton-sc-p5q16s-1:has(#Path_53113)",
+            "button.ButtonAnt__IconButton-sc-p5q16s-1:has(#Path_53114)",
+            "button:has(svg path[d*='M10.54,4.4'])",
         ]
-        for sel in modal_selectors:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=300):
-                    return btn
-            except Exception:
-                pass
+        for sel in exact_selectors:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=300):
+                return btn
 
-        if in_modal_only:
-            return None
+        # 2. Định danh theo title hoặc tooltip
+        for sel in ["button[title*='Xuất xml']", "button[title*='Xuất XML']"]:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=300):
+                return btn
 
-        # 2. Search toolbar / page buttons (strictly excluding Excel export buttons)
-        page_selectors = [
-            "button:has-text('Tải XML')",
-            "button:has-text('Xuất XML')",
-            "button:has-text('Tải hóa đơn')",
-            "button:has-text('Tải tệp XML')",
-            "button:has-text('Xuất tệp XML')",
-            "button:has-text('Tải về'):not(:has-text('Tải lại'))",
-            "button[title*='Tải XML']",
-            "button[title*='Xuất XML']",
-            "button[title*='Tải hóa đơn']",
-            "button[title*='Tải về']:not([title*='Tải lại'])",
-            "tr.ant-selected-row button:has(.anticon-download)",
-            "tr.ant-table-row-selected button:has(.anticon-download)",
-            "tr.ant-selected-row a:has(.anticon-download)",
-            "tr.ant-table-row-selected a:has(.anticon-download)",
-        ]
-        for sel in page_selectors:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=300) and btn.is_enabled():
-                    return btn
-            except Exception:
-                pass
+        # 3. Nút thứ 4 (ngoài cùng bên phải) trong nhóm icon button của thanh công cụ
+        # Thứ tự các nút: [Xem (0)] [In (1)] [Kết xuất Excel (2)] [Xuất XML (3)]
+        icon_btns = page.locator("button.ButtonAnt__IconButton-sc-p5q16s-1, .ant-btn-icon-only")
+        count = icon_btns.count()
+        if count >= 4:
+            cand = icon_btns.nth(3)  # Nút thứ 4 là Xuất XML
+            if cand.is_visible(timeout=300):
+                return cand
+        elif count > 0:
+            cand = icon_btns.last
+            if cand.is_visible(timeout=300):
+                return cand
+
+        # 4. Fallback theo text
+        for sel in ["button:has-text('Xuất XML')", "button:has-text('Xuất xml')", "button:has-text('Tải XML')"]:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=300):
+                return btn
 
         return None
 
@@ -378,11 +356,11 @@ class TaxPortalAutomation:
         row_data: Dict[str, str],
         retry_limit: int = 2,
     ) -> Optional[InvoiceHeader]:
-        """Download một hóa đơn theo quy trình:
-        1. Click vào hóa đơn để mở xem chi tiết (hoặc chọn dòng).
-        2. Tìm nút tải/xuất XML trong cửa sổ chi tiết hoặc thanh công cụ.
-        3. Click tải → bắt download → giải nén invoice.xml → lưu ALLINVOICE/.
-        4. Đóng cửa sổ chi tiết và sẵn sàng cho dòng tiếp theo.
+        """Tải XML một hóa đơn:
+        1. Click vào hóa đơn để chọn dòng (hiện highlight dòng).
+        2. Chờ nút 'Xuất xml' trên thanh công cụ được kích hoạt (enabled).
+        3. Click 'Xuất xml' -> bắt file download -> trích xuất invoice.xml -> lưu ALLINVOICE/.
+        4. Tự động hoàn thành để chuyển sang hóa đơn tiếp theo.
         """
         expected_key = InvoiceKey(
             mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
@@ -395,76 +373,56 @@ class TaxPortalAutomation:
 
         for attempt in range(retry_limit + 1):
             try:
-                # 1. Đảm bảo đóng mọi modal còn sót lại trước khi thao tác
-                self._close_modal_if_open(page)
+                # 1. Cuộn đến dòng hóa đơn và click chọn dòng
+                row.scroll_into_view_if_needed(timeout=3000)
+                time.sleep(0.15)
 
-                # 2. Cuộn đến dòng hóa đơn và click chọn dòng
-                row.scroll_into_view_if_needed(timeout=5000)
-                time.sleep(0.2)
-
-                # Click vào ô đầu tiên hoặc radio/checkbox để chọn dòng
+                # Click vào ô đầu tiên hoặc dòng để kích hoạt chọn dòng
                 try:
-                    cb = row.locator("td.ant-table-selection-column, .ant-radio-wrapper, .ant-checkbox-wrapper, input[type='radio'], input[type='checkbox']").first
-                    if cb.is_visible(timeout=300):
-                        cb.click()
+                    cells = row.locator("td")
+                    if cells.count() > 0:
+                        cells.nth(0).click()
                     else:
-                        cells = row.locator("td")
-                        if cells.count() > 0:
-                            cells.nth(0).click()
-                        else:
-                            row.click()
+                        row.click()
                 except Exception:
                     row.click()
 
-                time.sleep(0.4)
+                time.sleep(0.2)
 
-                # 3. Mở xem chi tiết hóa đơn (click vào hóa đơn)
-                # Kiểm tra nút tải trong modal trước nếu modal đã mở
-                download_btn = self._find_download_button(page, in_modal_only=True)
-
-                if not download_btn:
-                    # Tìm nút Xem hóa đơn (icon con mắt) trên dòng hoặc thanh công cụ
-                    view_btn = row.locator(
-                        "button:has(.anticon-eye), a:has(.anticon-eye), button[title*='Xem'], a[title*='Xem'], button:has-text('Xem')"
-                    ).first
-                    if not view_btn.is_visible(timeout=300):
-                        view_btn = page.locator(
-                            ".ant-btn:has(.anticon-eye), button:has-text('Xem hóa đơn'), button:has-text('Xem chi tiết'), button[title*='Xem']"
-                        ).first
-
-                    if view_btn.is_visible(timeout=400) and view_btn.is_enabled():
-                        logger.debug(f"Click nút 'Xem hóa đơn' cho HĐ {expected_key.sh_hoa_don}")
-                        view_btn.click()
-                    else:
-                        # Nhấp đúp vào dòng để mở chi tiết hóa đơn
-                        logger.debug(f"Nhấp đúp dòng hóa đơn {expected_key.sh_hoa_don} để mở chi tiết")
-                        row.dblclick()
-
-                    # Chờ modal hiển thị
-                    try:
-                        page.locator(".ant-modal:visible, div[role='dialog']:visible").first.wait_for(state="visible", timeout=3500)
-                    except Exception:
-                        pass
-                    time.sleep(0.8)
-
-                    download_btn = self._find_download_button(page, in_modal_only=True)
-
-                # Nếu vẫn chưa thấy trong modal, tìm nút xuất XML trên thanh công cụ / dòng
-                if not download_btn:
-                    download_btn = self._find_download_button(page, in_modal_only=False)
-
-                if not download_btn:
+                # 2. Tìm nút 'Xuất xml' trên thanh công cụ
+                export_btn = self._get_export_xml_button(page)
+                if not export_btn:
                     raise DownloadManagerError(
-                        f"Không tìm thấy nút tải/xuất XML cho hóa đơn số {expected_key.sh_hoa_don}"
+                        f"Không tìm thấy nút 'Xuất xml' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
-                logger.debug(f"Đã tìm thấy nút tải XML, bắt đầu kích hoạt download...")
+                # 3. Chờ nút 'Xuất xml' chuyển sang trạng thái ENABLED sau khi dòng được chọn
+                is_ready = False
+                for _ in range(15):  # Chờ tối đa 3 giây
+                    if export_btn.is_enabled():
+                        is_ready = True
+                        break
+                    time.sleep(0.2)
+
+                if not is_ready:
+                    # Nếu nút chưa enabled, thử click lại vào dòng
+                    logger.debug("Nút Xuất xml chưa enabled, thử click lại dòng...")
+                    row.click()
+                    time.sleep(0.3)
+                    if not export_btn.is_enabled():
+                        raise DownloadManagerError(
+                            f"Nút 'Xuất xml' bị disabled sau khi chọn hóa đơn số {expected_key.sh_hoa_don}"
+                        )
+
+                logger.debug(f"Nút 'Xuất xml' đã enabled, kích hoạt download...")
 
                 # 4. Kích hoạt và bắt sự kiện download
                 temp_downloads_dir = self.download_manager.downloads_dir
-                with page.expect_download(timeout=30000) as download_info:
-                    download_btn.click()
-                    # Xử lý dropdown định dạng nếu xuất hiện (XML vs PDF)
+                with page.expect_download(timeout=25000) as download_info:
+                    export_btn.click()
+                    logger.debug("Đã click nút 'Xuất xml', chờ nhận file...")
+
+                    # Xử lý dropdown nếu có
                     try:
                         dd_opt = page.locator(
                             ".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item:has-text('XML'), "
@@ -473,20 +431,18 @@ class TaxPortalAutomation:
                             ".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item:has-text('ZIP'), "
                             ".ant-dropdown:not(.ant-dropdown-hidden) .ant-dropdown-menu-item:has-text('Tải')"
                         ).first
-                        if dd_opt.is_visible(timeout=1500):
+                        if dd_opt.is_visible(timeout=800):
                             dd_opt.click()
-                            logger.debug("Đã chọn tùy chọn XML trong dropdown.")
                     except Exception:
                         pass
 
                 # 5. Nhận và lưu file tải về
                 download = download_info.value
                 suggested_filename = download.suggested_filename or "invoice.zip"
-                logger.info(f"Đã bắt được file tải về: {suggested_filename}")
+                logger.info(f"Đã nhận file tải về: {suggested_filename}")
 
-                # Bảo vệ: Nếu vô tình tải về file Excel danh sách, báo lỗi và bỏ qua
+                # Bảo vệ an toàn: nếu vô tình tải về file Excel danh sách thì báo lỗi
                 if suggested_filename.lower().endswith((".xlsx", ".xls")):
-                    self._close_modal_if_open(page)
                     raise DownloadManagerError(
                         f"Cổng Thuế trả về file Excel ({suggested_filename}) thay vì ZIP/XML hóa đơn"
                     )
@@ -497,9 +453,6 @@ class TaxPortalAutomation:
 
                 download.save_as(str(temp_save_path))
                 logger.info(f"Đã lưu file tạm: {temp_save_path.name}")
-
-                # Đóng modal ngay sau khi tải xong để quay lại bảng
-                self._close_modal_if_open(page)
 
                 # 6. Xử lý ZIP → trích xuất invoice.xml → lưu ALLINVOICE/
                 _, invoice_header = self.download_manager.process_downloaded_zip(
@@ -518,7 +471,7 @@ class TaxPortalAutomation:
                         f"Thử lại hóa đơn {expected_key.sh_hoa_don} "
                         f"(lần {attempt + 1}/{retry_limit}): {e}"
                     )
-                    time.sleep(2.0)
+                    time.sleep(1.5)
                 else:
                     logger.error(f"Thất bại khi tải hóa đơn {expected_key.sh_hoa_don}: {e}")
                     self.download_manager._record_failure(
@@ -647,10 +600,14 @@ class TaxPortalAutomation:
 
             # Handle pagination
             next_selectors = [
+                "button:has(.anticon-right):not([disabled])",
+                ".ant-pagination-next:not(.ant-pagination-disabled) button",
                 "li.ant-pagination-next:not(.ant-pagination-disabled) button",
                 "li.ant-pagination-next:not(.ant-pagination-disabled) a",
                 "li.ant-pagination-next:not(.ant-pagination-disabled) .ant-pagination-item-link",
                 ".ant-pagination-next:not(.ant-pagination-disabled)",
+                "button[aria-label='Next Page']:not([disabled])",
+                "button:has-text('>'):not([disabled])",
             ]
             next_btn = None
             for sel in next_selectors:
