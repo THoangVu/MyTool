@@ -67,18 +67,26 @@ class DownloadManager:
             self._record_failure(expected_key, err, zip_file.name, retry_count)
             raise DownloadManagerError(err)
 
-        if not zipfile.is_zipfile(zip_file):
-            err = f"File tải về không phải ZIP hợp lệ hoặc bị lỗi: {zip_file.name}"
-            self._record_failure(expected_key, err, zip_file.name, retry_count)
-            raise DownloadManagerError(err)
+        if zip_file.suffix.lower() == ".xml":
+            try:
+                xml_bytes = zip_file.read_bytes()
+            except Exception as e:
+                err = f"Lỗi đọc file XML ({zip_file.name}): {e}"
+                self._record_failure(expected_key, err, zip_file.name, retry_count)
+                raise DownloadManagerError(err) from e
+        else:
+            if not zipfile.is_zipfile(zip_file):
+                err = f"File tải về không phải ZIP hoặc XML hợp lệ hoặc bị lỗi: {zip_file.name}"
+                self._record_failure(expected_key, err, zip_file.name, retry_count)
+                raise DownloadManagerError(err)
 
-        # Extract invoice.xml bytes
-        try:
-            xml_bytes = extract_invoice_xml_bytes(zip_file)
-        except ZipExtractionError as e:
-            err = f"Lỗi giải nén ZIP ({zip_file.name}): {e}"
-            self._record_failure(expected_key, err, zip_file.name, retry_count)
-            raise DownloadManagerError(err) from e
+            # Extract invoice.xml bytes
+            try:
+                xml_bytes = extract_invoice_xml_bytes(zip_file)
+            except ZipExtractionError as e:
+                err = f"Lỗi giải nén ZIP ({zip_file.name}): {e}"
+                self._record_failure(expected_key, err, zip_file.name, retry_count)
+                raise DownloadManagerError(err) from e
 
         # Parse XML
         try:

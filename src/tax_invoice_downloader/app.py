@@ -450,6 +450,17 @@ class TaxInvoiceApp(tk.Tk):
             if not target_page:
                 target_page = pages[-1]
 
+            self.automation._wait_for_table_loaded(target_page)
+            rows_count = self.automation._get_table_rows(target_page).count()
+            if rows_count == 0:
+                raise RuntimeError(
+                    "Không tìm thấy dòng hóa đơn nào trên bảng của Cổng Thuế.\n\n"
+                    "Vui lòng thực hiện trên trình duyệt:\n"
+                    "1. Vào: Tra cứu ➔ Tra cứu hóa đơn ➔ Hóa đơn điện tử mua vào\n"
+                    "2. Chọn khoảng ngày và bấm nút 'Tìm kiếm'\n"
+                    "3. Khi danh sách hóa đơn hiện ra, bấm lại '🚀 2. Bắt đầu tải XML hóa đơn'!"
+                )
+
             self.automation.polite_delay_seconds = delay
 
             def on_progress(current, total, status_text):
