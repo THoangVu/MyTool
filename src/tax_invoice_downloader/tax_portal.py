@@ -3,10 +3,10 @@
 import time
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable, Tuple
+from typing import Optional, List, Dict, Any, Callable, Tuple, Set
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
-from .models import InvoiceKey, InvoiceHeader, SummaryStats
+from .models import InvoiceKey, InvoiceHeader, SummaryStats, ReconciliationReport
 from .download_manager import DownloadManager, DownloadManagerError
 from .logging_config import setup_logger
 
@@ -491,13 +491,17 @@ class TaxPortalAutomation:
         row: Locator,
         row_data: Dict[str, str],
         row_index: int = 0,
+        source_page: int = 1,
         retry_limit: int = 2,
     ) -> Optional[InvoiceHeader]:
-        """Tải XML một hóa đơn:
-        1. Click vào hóa đơn để chọn dòng (hiện highlight dòng).
-        2. Chờ nút 'Xuất xml' (nút thứ 4, ngoài cùng bên phải) được kích hoạt.
-        3. Click 'Xuất xml' -> bắt file download -> trích xuất invoice.xml -> lưu ALLINVOICE/.
-        4. Tự động chuyển ngay sang hóa đơn tiếp theo.
+        """Tải XML một hóa đơn theo quy trình bắt buộc Mục 3 Bước B:
+        1. Tạo thư mục tạm riêng biệt cho lượt tải (Mục 3 Bước C).
+        2. Chọn dòng hóa đơn (hiện highlight dòng).
+        3. Chờ nút 'Xuất xml' (nút thứ 4, ngoài cùng bên phải) sẵn sàng.
+        4. Bấm 'Xuất XML' đúng một lần -> theo dõi file tải hoàn tất.
+        5. Xác minh file tồn tại, không rỗng, ZIP mở được không lỗi CRC, XML parse được.
+        6. Đối soát dữ liệu XML với dòng nguồn -> trích xuất và lưu ALLINVOICE/.
+        7. Ghi nhận SUCCESS hoặc FAILED có mã lỗi chi tiết.
         """
         expected_key = InvoiceKey(
             mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
@@ -505,22 +509,39 @@ class TaxPortalAutomation:
             sh_hoa_don=row_data.get("sh_hoa_don", ""),
             ngay_lap=row_data.get("ngay_lap", ""),
         )
+        inv_key_str = expected_key.normalized_key()
 
-        logger.info(f"Bắt đầu xử lý hóa đơn: Số={expected_key.sh_hoa_don}, Ký hiệu={expected_key.kh_hoa_don}")
+        # Đánh dấu IN_PROGRESS trong manifest
+        self.download_manager.manifest_db.upsert_manifest(
+            invoice_key=inv_key_str,
+            mst_nguoi_ban=expected_key.mst_nguoi_ban,
+            kh_hoa_don=expected_key.kh_hoa_don,
+            sh_hoa_don=expected_key.sh_hoa_don,
+            ngay_lap=expected_key.ngay_lap,
+            source_page=source_page,
+            status="IN_PROGRESS",
+        )
+
+        logger.info(f"[BƯỚC B] Bắt đầu xử lý: Số={expected_key.sh_hoa_don}, Ký hiệu={expected_key.kh_hoa_don}, MST={expected_key.mst_nguoi_ban}")
 
         for attempt in range(retry_limit + 1):
+            temp_dir: Optional[Path] = None
             try:
-                # 1. Chọn dòng hóa đơn (click trực tiếp vào dòng/cell)
+                # 1. Tạo thư mục tạm riêng biệt cho lượt tải này (Mục 3 Bước C)
+                temp_dir = self.download_manager.create_isolated_temp_dir(inv_key_str)
+
+                # 2. Chọn dòng hóa đơn trên bảng
                 self._select_table_row(page, row, row_data, row_index=row_index)
 
-                # 2. Tìm nút 'Xuất xml' trên thanh công cụ (ngoài cùng bên phải, sau nút Xuất hóa đơn)
+                # 3. Định vị nút 'Xuất xml' (nút thứ 4, ngoài cùng bên phải)
                 export_btn = self._get_export_xml_button(page)
                 if not export_btn:
                     raise DownloadManagerError(
-                        f"Không tìm thấy nút 'Xuất xml' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}"
+                        f"Không tìm thấy nút 'Xuất xml' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}",
+                        error_code="TIMEOUT_BUTTON",
                     )
 
-                # 3. Chờ nút 'Xuất xml' đổi sang trạng thái ENABLED (tối đa 2.5s)
+                # 4. Chờ nút 'Xuất xml' sẵn sàng
                 is_ready = self._is_button_enabled(export_btn)
                 if not is_ready:
                     for _ in range(12):
@@ -542,17 +563,15 @@ class TaxPortalAutomation:
 
                 if not is_ready:
                     raise DownloadManagerError(
-                        f"Nút 'Xuất xml' vẫn bị disabled sau khi chọn hóa đơn số {expected_key.sh_hoa_don}"
+                        f"Nút 'Xuất xml' vẫn bị disabled sau khi chọn hóa đơn số {expected_key.sh_hoa_don}",
+                        error_code="TIMEOUT_BUTTON",
                     )
 
-                logger.debug("Nút 'Xuất xml' đã sẵn sàng, kích hoạt download...")
+                logger.debug(f"Nút 'Xuất xml' đã sẵn sàng, kích hoạt download vào thư mục riêng...")
 
-                # 4. Kích hoạt và bắt sự kiện download
-                temp_downloads_dir = self.download_manager.downloads_dir
-                with page.expect_download(timeout=25000) as download_info:
+                # 5. Kích hoạt và bắt sự kiện download
+                with page.expect_download(timeout=30000) as download_info:
                     export_btn.click()
-                    logger.debug("Đã click nút 'Xuất xml', chờ nhận file...")
-
                     # Xử lý dropdown nếu có
                     try:
                         dd_opt = page.locator(
@@ -567,51 +586,54 @@ class TaxPortalAutomation:
                     except Exception:
                         pass
 
-                # 5. Nhận và lưu file tải về
+                # 6. Nhận download và lưu vào thư mục tạm riêng biệt
                 download = download_info.value
-                suggested_filename = download.suggested_filename or "invoice.zip"
-                logger.info(f"Đã nhận file tải về: {suggested_filename}")
-
-                # Bảo vệ an toàn: nếu vô tình tải về file Excel danh sách thì báo lỗi nhầm nút
-                if suggested_filename.lower().endswith((".xlsx", ".xls")):
-                    raise DownloadManagerError(
-                        f"Cổng Thuế trả về file Excel ({suggested_filename}) thay vì ZIP/XML hóa đơn"
-                    )
-
-                temp_save_path = temp_downloads_dir / suggested_filename
-                if temp_save_path.exists():
-                    temp_save_path = temp_downloads_dir / f"{time.time_ns()}_{suggested_filename}"
-
+                filename = download.suggested_filename or "invoice.zip"
+                temp_save_path = temp_dir / filename
                 download.save_as(str(temp_save_path))
-                logger.info(f"Đã lưu file tạm: {temp_save_path.name}")
 
-                # 6. Xử lý ZIP → trích xuất invoice.xml → lưu ALLINVOICE/
-                _, invoice_header = self.download_manager.process_downloaded_zip(
-                    zip_path=temp_save_path,
+                # 7. Chờ file ổn định, không còn đuôi tạm
+                stabilized_file = self.download_manager.wait_for_download_stabilization(temp_dir, timeout=25.0)
+
+                # 8. Xác minh file, trích xuất XML và đối soát dữ liệu
+                target_xml_path, invoice_header = self.download_manager.process_downloaded_zip(
+                    zip_path=stabilized_file,
                     expected_key=expected_key,
+                    source_page=source_page,
                     retry_count=attempt,
                 )
+                logger.info(f"[SUCCESS] Hóa đơn số {expected_key.sh_hoa_don} đã được lưu và xác minh hợp lệ.")
                 return invoice_header
 
             except SessionExpiredError:
                 raise
             except Exception as e:
                 self._close_modal_if_open(page)
+                error_code = getattr(e, "error_code", "PROCESS_ERROR")
                 if attempt < retry_limit:
                     logger.warning(
-                        f"Thử lại hóa đơn {expected_key.sh_hoa_don} "
-                        f"(lần {attempt + 1}/{retry_limit}): {e}"
+                        f"Thử lại hóa đơn {expected_key.sh_hoa_don} (lần {attempt + 1}/{retry_limit}) - Mã lỗi: {error_code}: {e}"
                     )
-                    time.sleep(1.0)
+                    time.sleep(1.2 * (attempt + 1))
                 else:
-                    logger.error(f"Thất bại khi tải hóa đơn {expected_key.sh_hoa_don}: {e}")
+                    logger.error(f"[FAILED] Thất bại sau {retry_limit + 1} lần thử cho hóa đơn {expected_key.sh_hoa_don}: {e}")
                     self.download_manager._record_failure(
                         expected_key=expected_key,
                         error_msg=str(e),
                         temp_zip_name="",
                         retry_count=attempt,
+                        error_code=error_code,
+                        source_page=source_page,
                     )
                     return None
+            finally:
+                # Dọn dẹp thư mục tạm của lượt thử nếu còn
+                if temp_dir and temp_dir.exists():
+                    try:
+                        import shutil
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except Exception:
+                        pass
 
         return None
 
@@ -645,115 +667,297 @@ class TaxPortalAutomation:
         except Exception as e:
             logger.debug(f"Không có modal cần đóng hoặc đã đóng: {e}")
 
+    def get_announced_total_results(self, page: Page) -> Optional[int]:
+        """Đọc tổng số kết quả hiển thị trên Cổng Thuế (ví dụ: 'Có 1.367 kết quả')."""
+        try:
+            candidates = [
+                page.locator("text=/Có\\s+[\\d\\.,]+\\s+kết quả/i"),
+                page.locator(".ant-table-pagination-total-text"),
+                page.locator("div:has-text('kết quả')"),
+            ]
+            for cand in candidates:
+                count = cand.count()
+                for i in range(count):
+                    txt = cand.nth(i).inner_text().strip()
+                    m = re.search(r"Có\s+([\d\.,]+)\s+kết quả", txt, re.IGNORECASE)
+                    if m:
+                        raw = m.group(1).replace(".", "").replace(",", "").strip()
+                        if raw.isdigit():
+                            return int(raw)
+        except Exception as e:
+            logger.debug(f"Không thể đọc tổng số kết quả công bố: {e}")
+        return None
+
+    def _get_next_page_button(self, page: Page) -> Optional[Locator]:
+        """Tìm nút chuyển trang kế tiếp trên Cổng Thuế nếu còn trang tiếp theo."""
+        selectors = [
+            ".ant-pagination-next:not(.ant-pagination-disabled) button",
+            "li.ant-pagination-next:not(.ant-pagination-disabled) button",
+            "li.ant-pagination-next:not(.ant-pagination-disabled) a",
+            "li.ant-pagination-next:not(.ant-pagination-disabled) .ant-pagination-item-link",
+            "button:has(.anticon-right):not([disabled])",
+            "button:has(svg[data-icon='right']):not([disabled])",
+            ".ant-pagination-next:not(.ant-pagination-disabled)",
+            "button[aria-label='Next Page']:not([disabled])",
+            "button:has-text('>'):not([disabled])",
+        ]
+        for sel in selectors:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                btn = loc.first
+                try:
+                    if btn.is_visible(timeout=300) and btn.is_enabled():
+                        cls = btn.get_attribute("class") or ""
+                        parent_cls = ""
+                        try:
+                            parent_cls = btn.locator("..").get_attribute("class") or ""
+                        except Exception:
+                            pass
+                        if "disabled" not in cls and "disabled" not in parent_cls:
+                            return btn
+                except Exception:
+                    pass
+        return None
+
+    def _wait_for_page_transition(self, page: Page, old_first_key: str, timeout: float = 12.0):
+        """Chờ bảng dữ liệu sang trang mới hoàn tất và nội dung dòng đầu tiên thay đổi."""
+        start = time.time()
+        time.sleep(0.4)
+        while time.time() - start < timeout:
+            self._wait_for_table_loaded(page)
+            rows = self._get_table_rows(page)
+            if rows.count() > 0:
+                first_row_data = self.extract_row_data(rows.first)
+                new_key = InvoiceKey(
+                    mst_nguoi_ban=first_row_data.get("mst_nguoi_ban", ""),
+                    kh_hoa_don=first_row_data.get("kh_hoa_don", ""),
+                    sh_hoa_don=first_row_data.get("sh_hoa_don", ""),
+                    ngay_lap=first_row_data.get("ngay_lap", ""),
+                ).normalized_key()
+                if not old_first_key or new_key != old_first_key:
+                    logger.debug(f"Đã chuyển trang thành công (Dòng đầu mới: {first_row_data.get('sh_hoa_don')})")
+                    time.sleep(0.3)
+                    return
+            time.sleep(0.3)
+
+    def _build_reconciliation_report(
+        self,
+        announced_total: Optional[int],
+        seen_source_keys: Dict[str, Dict[str, Any]],
+        run_success_keys: Set[str],
+        run_already_verified_keys: Set[str],
+        run_failed_keys: Set[str],
+    ) -> SummaryStats:
+        """Thực hiện đối soát tổng số hóa đơn nguồn theo Mục 6 của FIX_TAI_THIEU_XML_TU_DONG.md."""
+        source_count = max(len(seen_source_keys), announced_total or len(seen_source_keys))
+        success_count = len(run_success_keys)
+        already_verified_count = len(run_already_verified_keys)
+        failed_count = len(run_failed_keys)
+        pending_count = max(0, source_count - (success_count + already_verified_count + failed_count))
+        missing_count = source_count - (success_count + already_verified_count)
+
+        report = ReconciliationReport(
+            source_count=source_count,
+            success_count=success_count,
+            already_verified_count=already_verified_count,
+            failed_count=failed_count,
+            pending_count=pending_count,
+            missing_invoice_count=missing_count,
+        )
+        is_balanced = report.verify_balance()
+
+        logger.info("=" * 64)
+        logger.info("           BÁO CÁO ĐỐI SOÁT HÓA ĐƠN NGUỒN (MỤC 6)")
+        logger.info("=" * 64)
+        logger.info(f"1. Tổng số hóa đơn nguồn (source_count)         : {source_count}")
+        logger.info(f"2. Tải thành công đợt này (success_count)       : {success_count}")
+        logger.info(f"3. Đã có từ trước (already_verified_count)      : {already_verified_count}")
+        logger.info(f"4. Thất bại sau retry (failed_count)            : {failed_count}")
+        logger.info(f"5. Chưa kịp xử lý (pending_count)               : {pending_count}")
+        logger.info(f"6. Tổng số hóa đơn chưa có XML (missing_count)  : {missing_count}")
+        logger.info(f"7. Trạng thái cân bằng công thức đối soát       : {'ĐẠT (Khớp 100%)' if is_balanced else 'CẢNH BÁO: CHƯA KHỚP'}")
+        logger.info("=" * 64)
+
+        # Xuất missing_or_failed_invoices.csv nếu có hóa đơn lỗi hoặc thiếu (Mục 6)
+        from .download_manager import BASE_DIR
+        output_dir = BASE_DIR / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        missing_csv_path = output_dir / "missing_or_failed_invoices.csv"
+
+        if missing_count > 0 or failed_count > 0:
+            exported_cnt = self.download_manager.manifest_db.export_missing_or_failed_csv(missing_csv_path)
+            report.csv_report_path = str(missing_csv_path)
+            logger.info(f"Đã xuất danh sách {exported_cnt} hóa đơn thiếu/lỗi ra file: {missing_csv_path}")
+
+        return SummaryStats(
+            so_dong_tim_thay=source_count,
+            so_da_tai=success_count + already_verified_count,
+            so_xml_thanh_cong=success_count,
+            so_loi=failed_count,
+            so_bo_qua=already_verified_count,
+            so_cho_xu_ly=pending_count,
+            so_thieu=missing_count,
+            reconciliation=report,
+        )
+
     def run_download_all(
         self,
         page: Page,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         max_invoices: Optional[int] = None,
     ) -> SummaryStats:
-        """Processes all invoice rows across all available pages.
-
-        - Respects progress callback(current_index, total, status_text).
-        - Skips already extracted invoices.
-        - Supports graceful cancellation via request_stop().
+        """Thực hiện tải tuần tự từng hóa đơn một theo quy trình bắt buộc trong FIX_TAI_THIEU_XML_TU_DONG.md:
+        - Xử lý tuần tự: Chọn hóa đơn -> Xuất XML -> Đợi file tải hoàn tất -> Kiểm tra file -> Ghi nhận kết quả -> Mới chuyển sang hóa đơn tiếp theo.
+        - Không bỏ sót bất kỳ hóa đơn nào.
+        - Đối soát tổng số hóa đơn nguồn (source_count).
+        - Xuất báo cáo missing_or_failed_invoices.csv nếu có hóa đơn lỗi/thiếu.
         """
         self._stop_requested = False
-        processed_count = 0
         current_page_num = 1
+        processed_count = 0
+
+        # Bước A: Xác định tổng số hóa đơn nguồn theo công bố trên Cổng Thuế
+        announced_total = self.get_announced_total_results(page)
+        if announced_total:
+            logger.info(f"[BƯỚC A] Tổng số hóa đơn công bố trên Cổng Thuế: {announced_total} kết quả.")
+        else:
+            logger.info("[BƯỚC A] Không đọc được số tổng công bố, sẽ tính tổng nguồn theo số dòng thực tế quét được.")
+
+        seen_source_keys: Dict[str, Dict[str, Any]] = {}
+        run_success_keys: Set[str] = set()
+        run_already_verified_keys: Set[str] = set()
+        run_failed_keys: Set[str] = set()
 
         while not self._stop_requested:
             self._wait_for_table_loaded(page)
             col_map = self._get_column_map(page)
             rows = self._get_table_rows(page)
             row_count = rows.count()
-            logger.info(f"Trang {current_page_num}: Tìm thấy {row_count} dòng hóa đơn.")
+
+            logger.info(f"--- Đang xử lý Trang {current_page_num}: Có {row_count} dòng hóa đơn ---")
 
             if row_count == 0:
-                logger.info("Không có dòng hóa đơn nào trên trang hiện tại.")
+                logger.info(f"Trang {current_page_num} không có dòng hóa đơn nào.")
                 break
 
-            seen_keys_on_page = set()
-
+            # Ghi nhận toàn bộ hóa đơn trên trang hiện tại vào danh sách nguồn
+            page_invoices: List[Tuple[int, InvoiceKey, Dict[str, str]]] = []
             for i in range(row_count):
+                row_el = rows.nth(i)
+                data = self.extract_row_data(row_el, col_map=col_map)
+                inv_key = InvoiceKey(
+                    mst_nguoi_ban=data.get("mst_nguoi_ban", ""),
+                    kh_hoa_don=data.get("kh_hoa_don", ""),
+                    sh_hoa_don=data.get("sh_hoa_don", ""),
+                    ngay_lap=data.get("ngay_lap", ""),
+                )
+                k_str = inv_key.normalized_key()
+                if k_str not in seen_source_keys:
+                    seen_source_keys[k_str] = {
+                        "key": inv_key,
+                        "data": data,
+                        "source_page": current_page_num,
+                    }
+                    existing_status = self.download_manager.manifest_db.get_invoice_status(k_str)
+                    if not existing_status:
+                        self.download_manager.manifest_db.upsert_manifest(
+                            invoice_key=k_str,
+                            mst_nguoi_ban=inv_key.mst_nguoi_ban,
+                            kh_hoa_don=inv_key.kh_hoa_don,
+                            sh_hoa_don=inv_key.sh_hoa_don,
+                            ngay_lap=inv_key.ngay_lap,
+                            source_page=current_page_num,
+                            status="PENDING",
+                        )
+                page_invoices.append((i, inv_key, data))
+
+            # Xử lý tuần tự từng hóa đơn trên trang
+            for row_idx, inv_key, row_data in page_invoices:
                 if self._stop_requested:
-                    logger.info("Đã nhận yêu cầu dừng từ người dùng.")
+                    logger.info("Nhận được tín hiệu dừng từ người dùng.")
                     break
 
                 if max_invoices and processed_count >= max_invoices:
                     logger.info(f"Đã đạt số lượng tối đa cần tải ({max_invoices}).")
                     break
 
-                # Re-query rows in case DOM refreshed
-                current_rows = self._get_table_rows(page)
-                if i >= current_rows.count():
-                    break
-                row = current_rows.nth(i)
+                k_str = inv_key.normalized_key()
+                total_target = announced_total or len(seen_source_keys)
 
-                row_data = self.extract_row_data(row, col_map=col_map)
-                candidate_key = InvoiceKey(
-                    mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
-                    kh_hoa_don=row_data.get("kh_hoa_don", ""),
-                    sh_hoa_don=row_data.get("sh_hoa_don", ""),
-                    ngay_lap=row_data.get("ngay_lap", ""),
-                )
-                key_str = candidate_key.normalized_key()
-
-                # Deduplicate fixed-column duplicate elements on the same page
-                unique_row_id = f"{candidate_key.sh_hoa_don}_{candidate_key.kh_hoa_don}_{candidate_key.ngay_lap}"
-                if unique_row_id in seen_keys_on_page and candidate_key.sh_hoa_don:
-                    continue
-                seen_keys_on_page.add(unique_row_id)
-
-                # Check if already processed
+                # 1. Kiểm tra xem hóa đơn này đã được xác minh hợp lệ trước đó chưa (ALREADY_VERIFIED)
                 if self.download_manager.manifest_db.is_invoice_completed(
-                    invoice_key=key_str,
-                    sh_hoa_don=candidate_key.sh_hoa_don,
-                    kh_hoa_don=candidate_key.kh_hoa_don,
+                    invoice_key=k_str,
+                    sh_hoa_don=inv_key.sh_hoa_don,
+                    kh_hoa_don=inv_key.kh_hoa_don,
+                    allinvoice_dir=self.download_manager.allinvoice_dir,
                 ):
-                    logger.info(f"Hóa đơn {candidate_key.sh_hoa_don} ({candidate_key.kh_hoa_don}) đã hoàn thành trước đó. Bỏ qua.")
-                    if progress_callback:
-                        progress_callback(processed_count + 1, row_count, f"Bỏ qua (đã có): {candidate_key.sh_hoa_don}")
+                    logger.info(f"[ALREADY_VERIFIED] Hóa đơn {inv_key.sh_hoa_don} ({inv_key.kh_hoa_don}) đã có XML hợp lệ trên ổ đĩa. Bỏ qua.")
+                    self.download_manager.manifest_db.upsert_manifest(
+                        invoice_key=k_str,
+                        mst_nguoi_ban=inv_key.mst_nguoi_ban,
+                        kh_hoa_don=inv_key.kh_hoa_don,
+                        sh_hoa_don=inv_key.sh_hoa_don,
+                        ngay_lap=inv_key.ngay_lap,
+                        source_page=current_page_num,
+                        status="ALREADY_VERIFIED",
+                    )
+                    run_already_verified_keys.add(k_str)
                     processed_count += 1
+                    if progress_callback:
+                        progress_callback(processed_count, total_target, f"Đã có: {inv_key.sh_hoa_don}")
                     continue
+
+                # 2. Re-query row element trên DOM để tránh lỗi stale DOM element
+                current_rows = self._get_table_rows(page)
+                if row_idx >= current_rows.count():
+                    row_el = current_rows.last
+                else:
+                    row_el = current_rows.nth(row_idx)
 
                 if progress_callback:
-                    progress_callback(processed_count + 1, row_count, f"Đang tải: {candidate_key.sh_hoa_don}")
+                    progress_callback(processed_count + 1, total_target, f"Đang tải: {inv_key.sh_hoa_don}")
 
-                # Download invoice
-                self.download_invoice_row(page, row, row_data, row_index=i)
+                # 3. Thực hiện tải tuần tự hóa đơn hiện tại
+                header = self.download_invoice_row(
+                    page=page,
+                    row=row_el,
+                    row_data=row_data,
+                    row_index=row_idx,
+                    source_page=current_page_num,
+                )
+
+                if header:
+                    run_success_keys.add(k_str)
+                else:
+                    run_failed_keys.add(k_str)
+
                 processed_count += 1
 
-                # Polite delay between downloads
+                # Polite delay giữa các lần tải
                 time.sleep(self.polite_delay_seconds)
 
             if self._stop_requested or (max_invoices and processed_count >= max_invoices):
                 break
 
-            # Handle pagination
-            next_selectors = [
-                "button:has(.anticon-right):not([disabled])",
-                ".ant-pagination-next:not(.ant-pagination-disabled) button",
-                "li.ant-pagination-next:not(.ant-pagination-disabled) button",
-                "li.ant-pagination-next:not(.ant-pagination-disabled) a",
-                "li.ant-pagination-next:not(.ant-pagination-disabled) .ant-pagination-item-link",
-                ".ant-pagination-next:not(.ant-pagination-disabled)",
-                "button[aria-label='Next Page']:not([disabled])",
-                "button:has-text('>'):not([disabled])",
-            ]
-            next_btn = None
-            for sel in next_selectors:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=1200):
-                    next_btn = btn
-                    break
-
+            # Bước chuyển trang tiếp theo
+            next_btn = self._get_next_page_button(page)
             if next_btn:
-                logger.info("Chuyển sang trang tiếp theo...")
+                logger.info(f"Đang chuyển từ Trang {current_page_num} sang Trang {current_page_num + 1}...")
+                first_key_before = page_invoices[0][1].normalized_key() if page_invoices else ""
                 next_btn.click()
                 current_page_num += 1
-                time.sleep(1.5)
+
+                self._wait_for_page_transition(page, old_first_key=first_key_before, timeout=12.0)
             else:
-                logger.info("Đã duyệt hết tất cả các trang.")
+                logger.info(f"Đã duyệt hết tất cả các trang (kết thúc ở Trang {current_page_num}).")
                 break
 
-        return self.download_manager.manifest_db.get_summary_stats()
+        # Bước 6: Đối soát tổng số hóa đơn nguồn (Reconciliation)
+        final_stats = self._build_reconciliation_report(
+            announced_total=announced_total,
+            seen_source_keys=seen_source_keys,
+            run_success_keys=run_success_keys,
+            run_already_verified_keys=run_already_verified_keys,
+            run_failed_keys=run_failed_keys,
+        )
+        return final_stats

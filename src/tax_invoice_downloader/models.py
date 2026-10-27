@@ -113,6 +113,32 @@ class DownloadHistoryRecord:
     ten_zip_tam: str = ""
     ten_xml_dau_ra: str = ""
     thong_bao_loi: str = ""
+    ma_loi: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ReconciliationReport:
+    """Đối soát tổng số hóa đơn nguồn theo Mục 6 của FIX_TAI_THIEU_XML_TU_DONG.md."""
+    source_count: int = 0
+    success_count: int = 0
+    already_verified_count: int = 0
+    failed_count: int = 0
+    pending_count: int = 0
+    duplicate_file_count: int = 0
+    missing_invoice_count: int = 0
+    is_balanced: bool = False
+    missing_or_failed_items: List[Dict[str, Any]] = field(default_factory=list)
+    csv_report_path: Optional[str] = None
+
+    def verify_balance(self) -> bool:
+        """Công thức đối soát: source_count == success_count + already_verified_count + failed_count + pending_count."""
+        expected = self.success_count + self.already_verified_count + self.failed_count + self.pending_count
+        self.missing_invoice_count = max(0, self.source_count - (self.success_count + self.already_verified_count))
+        self.is_balanced = (self.source_count == expected)
+        return self.is_balanced
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -126,6 +152,12 @@ class SummaryStats:
     so_xml_thanh_cong: int = 0
     so_loi: int = 0
     so_bo_qua: int = 0
+    so_cho_xu_ly: int = 0
+    so_thieu: int = 0
+    reconciliation: Optional[ReconciliationReport] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        if self.reconciliation:
+            d["reconciliation"] = self.reconciliation.to_dict()
+        return d

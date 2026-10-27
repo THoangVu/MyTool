@@ -93,7 +93,7 @@ class TestDownloadManager(unittest.TestCase):
         # Verify Manifest DB recorded the invoice
         inv_status = self.manifest_db.get_invoice_status(expected_key.normalized_key())
         self.assertIsNotNone(inv_status)
-        self.assertEqual(inv_status["status"], "XML_EXTRACTED")
+        self.assertIn(inv_status["status"], ("SUCCESS", "XML_EXTRACTED"))
         self.assertEqual(inv_status["xml_filename"], "3400401523_C26TNT_00005286_20261009.xml")
 
     def test_corrupted_zip_records_failure(self):

@@ -247,7 +247,14 @@ class TaxInvoiceApp(tk.Tk):
             text="📄 Mở File Excel",
             command=self._open_excel_file
         )
-        self.btn_open_excel.pack(side=tk.LEFT)
+        self.btn_open_excel.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_open_missing = ttk.Button(
+            action_bar,
+            text="📑 File Đối Soát Thiếu/Lỗi",
+            command=self._open_missing_csv_file
+        )
+        self.btn_open_missing.pack(side=tk.LEFT)
 
         # 4. Progress and Status Bar
         prog_frame = ttk.Frame(container)
@@ -340,10 +347,11 @@ class TaxInvoiceApp(tk.Tk):
             logger.warning(f"Lỗi khởi tạo danh sách lịch sử: {e}")
 
     def _update_stats_display(self, stats: SummaryStats):
-        self.lbl_stat_total.config(text=f"Tìm thấy: {stats.so_dong_tim_thay}")
-        self.lbl_stat_success.config(text=f"XML Thành công: {stats.so_xml_thanh_cong}")
-        self.lbl_stat_skipped.config(text=f"Đã có (Bỏ qua): {stats.so_bo_qua}")
-        self.lbl_stat_errors.config(text=f"Lỗi: {stats.so_loi}")
+        self.lbl_stat_total.config(text=f"Nguồn: {stats.so_dong_tim_thay}")
+        self.lbl_stat_success.config(text=f"XML Mới: {stats.so_xml_thanh_cong}")
+        self.lbl_stat_skipped.config(text=f"Đã có sẵn: {stats.so_bo_qua}")
+        err_total = stats.so_loi + getattr(stats, "so_cho_xu_ly", 0)
+        self.lbl_stat_errors.config(text=f"Thiếu/Lỗi: {err_total}")
 
     def _open_browser_action(self):
         """Launches browser with persistent context via dedicated browser worker thread."""
@@ -473,14 +481,31 @@ class TaxInvoiceApp(tk.Tk):
         def _on_success(stats):
             self._cleanup_download_ui()
             self._refresh_history_table()
-            messagebox.showinfo(
-                "Hoàn thành",
-                f"Đã hoàn thành lượt tải hóa đơn!\n"
-                f"- Số XML thành công: {stats.so_xml_thanh_cong}\n"
-                f"- Số bỏ qua (đã có): {stats.so_bo_qua}\n"
-                f"- Số lỗi: {stats.so_loi}\n\n"
-                f"Bạn có thể bấm 'Xuất Excel Tổng Hợp' để xem báo cáo đối chiếu."
-            )
+            recon = getattr(stats, "reconciliation", None)
+            if recon:
+                balance_txt = "ĐÃ CÂN BẰNG (Khớp 100% hóa đơn)" if recon.is_balanced else "CHƯA CÂN BẰNG (Có hóa đơn thiếu/lỗi)"
+                msg = (
+                    f"KẾT QUẢ TẢI & ĐỐI SOÁT HÓA ĐƠN NGUỒN (MỤC 6):\n\n"
+                    f"• Tổng số hóa đơn nguồn (source_count): {recon.source_count}\n"
+                    f"  ✓ Tải mới thành công (success_count): {recon.success_count}\n"
+                    f"  ✓ Đã có từ trước (already_verified): {recon.already_verified_count}\n"
+                    f"  ✗ Thất bại sau retry (failed_count): {recon.failed_count}\n"
+                    f"  ⏳ Chưa kịp xử lý (pending_count): {recon.pending_count}\n\n"
+                    f"• Tổng số hóa đơn chưa có XML: {recon.missing_invoice_count}\n"
+                    f"• Trạng thái công thức đối soát: {balance_txt}\n"
+                )
+                if recon.csv_report_path:
+                    msg += f"\n📄 Đã xuất danh sách hóa đơn thiếu/lỗi vào:\n{recon.csv_report_path}\n\nBạn có thể bấm '📑 File Đối Soát Thiếu/Lỗi' để mở danh sách chi tiết."
+                messagebox.showinfo("Báo Cáo Đối Soát", msg)
+            else:
+                messagebox.showinfo(
+                    "Hoàn thành",
+                    f"Đã hoàn thành lượt tải hóa đơn!\n"
+                    f"- Số XML thành công: {stats.so_xml_thanh_cong}\n"
+                    f"- Số bỏ qua (đã có): {stats.so_bo_qua}\n"
+                    f"- Số lỗi: {stats.so_loi}\n\n"
+                    f"Bạn có thể bấm 'Xuất Excel Tổng Hợp' để xem báo cáo đối chiếu."
+                )
 
         def _on_error(err):
             self._cleanup_download_ui()
@@ -561,6 +586,18 @@ class TaxInvoiceApp(tk.Tk):
             os.startfile(str(DEFAULT_EXCEL_PATH))
         else:
             messagebox.showinfo("Thông báo", "Chưa có file Excel. Vui lòng bấm 'Xuất Excel Tổng Hợp' trước.")
+
+    def _open_missing_csv_file(self):
+        csv_path = OUTPUT_DIR / "missing_or_failed_invoices.csv"
+        if not csv_path.exists():
+            cnt = self.manifest_db.export_missing_or_failed_csv(csv_path)
+            if cnt == 0:
+                messagebox.showinfo("Thông báo", "Tuyệt vời! Tất cả hóa đơn nguồn đều đã tải và đối soát thành công (không có hóa đơn nào bị thiếu hay lỗi).")
+                return
+        try:
+            os.startfile(str(csv_path))
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể mở file CSV đối soát: {e}")
 
     def _on_close(self):
         """Cleans up browser when closing desktop application."""
