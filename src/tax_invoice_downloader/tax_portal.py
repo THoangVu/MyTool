@@ -289,11 +289,14 @@ class TaxPortalAutomation:
         return data
 
     def _get_table_rows(self, page: Page) -> Locator:
-        """Finds main table rows avoiding duplicates from Ant Design fixed-column sidebars."""
+        """Finds table rows prioritizing the left fixed table (.ant-table-fixed-left)
+        where visible, clickable cells and invoice details reside on Cổng Thuế.
+        """
         selectors = [
+            ".ant-table-fixed-left tbody.ant-table-tbody tr.ant-table-row",
+            ".ant-table-fixed-left tbody tr.ant-table-row",
             "div.ant-table-scroll div.ant-table-body tr.ant-table-row",
             "div.ant-table-body table tbody tr.ant-table-row",
-            ".ant-table-fixed-left tbody tr.ant-table-row",
             "div.ant-table-content table tbody tr.ant-table-row",
             ".ant-table-tbody tr.ant-table-row",
             "tr.ant-table-row",
@@ -306,31 +309,54 @@ class TaxPortalAutomation:
         return page.locator("tr.ant-table-row")
 
     def _get_export_xml_button(self, page: Page) -> Optional[Locator]:
-        """Định vị chính xác nút 'Xuất xml' trên thanh công cụ bảng."""
-        # 1. Định danh chính xác nhất theo SVG Path do Cổng Thuế định nghĩa
-        exact_selectors = [
+        """Định vị chính xác nút 'Xuất xml' trên thanh công cụ bảng.
+
+        Quy tắc quan trọng từ giao diện Cổng Thuế và yêu cầu người dùng:
+        - Thanh công cụ có 4 icon buttons bên phải:
+          [0: Xem chi tiết] [1: In hóa đơn] [2: Xuất hóa đơn (Excel)] [3: Xuất xml (XML)]
+        - Nút [2: Xuất hóa đơn] và nút [3: Xuất xml] dùng chung biểu tượng SVG (#icon_ketxuat, #Path_53113).
+        - Nút [3: Xuất xml] luôn nằm BÊN PHẢI NGOÀI CÙNG (nằm phía sau nút Xuất hóa đơn).
+        - TUYỆT ĐỐI KHÔNG dùng .first (sẽ chọn nhầm nút Xuất hóa đơn tải về file Excel).
+        - Luôn chọn .last trong nhóm nút có icon ketxuat hoặc nút thứ 4 (nth(3)) của toolbar.
+        """
+        # 1. Nhóm nút có icon SVG #Path_53113, #Path_53114, #icon_ketxuat -> LẤY NÚT CUỐI CÙNG (.last)
+        ketxuat_selectors = [
+            ".ant-col button:has(#Path_53113)",
+            ".ant-col button:has(#Path_53114)",
+            ".ant-col button:has([data-name='Path 53113'])",
+            ".ant-col button:has([data-name='Path 53114'])",
+            ".ant-col button:has(#icon_ketxuat)",
             "button:has(#Path_53113)",
             "button:has(#Path_53114)",
             "button:has([data-name='Path 53113'])",
             "button:has([data-name='Path 53114'])",
-            "button.ButtonAnt__IconButton-sc-p5q16s-1:has(#Path_53113)",
-            "button.ButtonAnt__IconButton-sc-p5q16s-1:has(#Path_53114)",
+            "button:has(#icon_ketxuat)",
             "button:has(svg path[d*='M10.54,4.4'])",
         ]
-        for sel in exact_selectors:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=300):
-                return btn
+        for sel in ketxuat_selectors:
+            loc = page.locator(sel)
+            count = loc.count()
+            if count > 0:
+                cand = loc.last
+                if cand.is_visible(timeout=300):
+                    return cand
 
         # 2. Định danh theo title hoặc tooltip
-        for sel in ["button[title*='Xuất xml']", "button[title*='Xuất XML']"]:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=300):
-                return btn
+        for sel in [
+            "button[title*='xml' i]",
+            "button[title*='XML' i]",
+            "button[aria-label*='xml' i]",
+            "button[aria-label*='XML' i]",
+        ]:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                cand = loc.last
+                if cand.is_visible(timeout=300):
+                    return cand
 
         # 3. Nút thứ 4 (ngoài cùng bên phải) trong nhóm icon button của thanh công cụ
         # Thứ tự các nút: [Xem (0)] [In (1)] [Kết xuất Excel (2)] [Xuất XML (3)]
-        icon_btns = page.locator("button.ButtonAnt__IconButton-sc-p5q16s-1, .ant-btn-icon-only")
+        icon_btns = page.locator(".ant-col button.ButtonAnt__IconButton-sc-p5q16s-1, .ant-col button.ant-btn-icon-only")
         count = icon_btns.count()
         if count >= 4:
             cand = icon_btns.nth(3)  # Nút thứ 4 là Xuất XML
@@ -341,51 +367,80 @@ class TaxPortalAutomation:
             if cand.is_visible(timeout=300):
                 return cand
 
-        # 4. Fallback theo text
+        # 4. Fallback theo text nếu có
         for sel in ["button:has-text('Xuất XML')", "button:has-text('Xuất xml')", "button:has-text('Tải XML')"]:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=300):
-                return btn
+            cand = page.locator(sel).last
+            if cand.is_visible(timeout=300):
+                return cand
 
         return None
+
+    def _is_button_enabled(self, btn: Optional[Locator]) -> bool:
+        """Kiểm tra nút có thực sự ở trạng thái sẵn sàng click không (không bị disabled)."""
+        if not btn:
+            return False
+        try:
+            if not btn.is_visible(timeout=200):
+                return False
+            if not btn.is_enabled():
+                return False
+            cls = btn.get_attribute("class") or ""
+            if "disabled" in cls or "ant-btn-disabled" in cls:
+                return False
+            if btn.get_attribute("disabled") is not None:
+                return False
+            if btn.get_attribute("aria-disabled") == "true":
+                return False
+            return True
+        except Exception:
+            return False
 
     def _select_table_row(
         self,
         page: Page,
         row: Locator,
         row_data: Dict[str, str],
-        export_btn: Optional[Locator],
+        row_index: int = 0,
     ) -> bool:
-        """Kích hoạt chọn dòng hóa đơn cho đến khi nút 'Xuất xml' được enabled."""
+        """Kích hoạt chọn dòng hóa đơn cho đến khi dòng được chọn hoặc nút 'Xuất xml' được kích hoạt."""
         row_key = row.get_attribute("data-row-key") or ""
         sh_hoa_don = row_data.get("sh_hoa_don", "")
         kh_hoa_don = row_data.get("kh_hoa_don", "")
 
-        # 1. Thử click trực tiếp vào ô có chữ nhìn thấy được (Số HĐ hoặc Ký hiệu)
+        # 1. Cuộn đến dòng
+        try:
+            row.scroll_into_view_if_needed(timeout=1000)
+        except Exception:
+            pass
+
+        # 2. Thử click trực tiếp vào ô có chữ nhìn thấy được (Số HĐ hoặc Ký hiệu)
         target_cells = []
         if sh_hoa_don:
+            target_cells.append(page.locator(f".ant-table-fixed-left tr td:has-text('{sh_hoa_don}')"))
             target_cells.append(page.locator(f"tr td:has-text('{sh_hoa_don}')"))
         if kh_hoa_don:
+            target_cells.append(page.locator(f".ant-table-fixed-left tr td:has-text('{kh_hoa_don}')"))
             target_cells.append(page.locator(f"tr td:has-text('{kh_hoa_don}')"))
         target_cells.append(row.locator("td"))
 
         for cell_locator in target_cells:
             count = cell_locator.count()
-            for idx in range(min(count, 5)):
+            for idx in range(min(count, 4)):
                 c = cell_locator.nth(idx)
                 try:
-                    if c.is_visible(timeout=200) and c.inner_text().strip():
-                        c.click(timeout=800)
-                        time.sleep(0.25)
-                        if export_btn and export_btn.is_enabled():
+                    if c.is_visible(timeout=150) and c.inner_text().strip():
+                        c.click(timeout=600)
+                        time.sleep(0.15)
+                        export_btn = self._get_export_xml_button(page)
+                        if export_btn and self._is_button_enabled(export_btn):
                             logger.debug(f"Đã chọn thành công dòng qua cell (text='{c.inner_text().strip()}')")
                             return True
                 except Exception:
                     pass
 
-        # 2. Kích hoạt sự kiện native click thông qua JavaScript trên tất cả phần tử của dòng
+        # 3. Kích hoạt sự kiện native click thông qua JavaScript trên tất cả phần tử tương ứng của dòng
         try:
-            page.evaluate("""({ key, sh }) => {
+            page.evaluate("""({ key, sh, rowIndex }) => {
                 let targets = [];
                 if (key) {
                     targets = Array.from(document.querySelectorAll(`tr[data-row-key="${key}"]`));
@@ -394,41 +449,36 @@ class TaxPortalAutomation:
                     const rows = document.querySelectorAll('tr.ant-table-row');
                     targets = Array.from(rows).filter(r => r.innerText.includes(sh));
                 }
+                if (targets.length === 0) {
+                    const fixedRows = document.querySelectorAll('.ant-table-fixed-left tbody tr.ant-table-row, tbody.ant-table-tbody tr.ant-table-row');
+                    if (fixedRows[rowIndex]) targets = [fixedRows[rowIndex]];
+                }
                 targets.forEach(tr => {
-                    tr.click();
-                    tr.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                    Array.from(tr.children).forEach(td => {
-                        td.click();
-                        td.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    tr.scrollIntoView({ block: 'nearest' });
+                    ['mousedown', 'mouseup', 'click'].forEach(evt => {
+                        tr.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                    });
+                    Array.from(tr.querySelectorAll('td')).forEach(td => {
+                        ['mousedown', 'mouseup', 'click'].forEach(evt => {
+                            td.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                        });
                     });
                 });
-            }""", {"key": row_key, "sh": sh_hoa_don})
-            time.sleep(0.3)
-            if export_btn and export_btn.is_enabled():
+            }""", {"key": row_key, "sh": sh_hoa_don, "rowIndex": row_index})
+            time.sleep(0.2)
+            export_btn = self._get_export_xml_button(page)
+            if export_btn and self._is_button_enabled(export_btn):
                 logger.debug(f"Đã chọn thành công dòng qua JavaScript dispatch (key={row_key})")
                 return True
         except Exception as e:
             logger.debug(f"JS row selection: {e}")
 
-        # 3. Thử click bảng fixed-left nếu có
-        if row_key:
-            try:
-                fixed_cells = page.locator(f".ant-table-fixed-left tr[data-row-key='{row_key}'] td")
-                for i in range(fixed_cells.count()):
-                    fc = fixed_cells.nth(i)
-                    if fc.is_visible() and fc.inner_text().strip():
-                        fc.click(timeout=600)
-                        time.sleep(0.25)
-                        if export_btn and export_btn.is_enabled():
-                            return True
-            except Exception:
-                pass
-
         # 4. Fallback click trực tiếp vào dòng
         try:
-            row.click(force=True)
-            time.sleep(0.25)
-            if export_btn and export_btn.is_enabled():
+            row.click(force=True, timeout=600)
+            time.sleep(0.15)
+            export_btn = self._get_export_xml_button(page)
+            if export_btn and self._is_button_enabled(export_btn):
                 return True
         except Exception:
             pass
@@ -440,13 +490,14 @@ class TaxPortalAutomation:
         page: Page,
         row: Locator,
         row_data: Dict[str, str],
+        row_index: int = 0,
         retry_limit: int = 2,
     ) -> Optional[InvoiceHeader]:
         """Tải XML một hóa đơn:
         1. Click vào hóa đơn để chọn dòng (hiện highlight dòng).
-        2. Chờ nút 'Xuất xml' trên thanh công cụ được kích hoạt (enabled).
+        2. Chờ nút 'Xuất xml' (nút thứ 4, ngoài cùng bên phải) được kích hoạt.
         3. Click 'Xuất xml' -> bắt file download -> trích xuất invoice.xml -> lưu ALLINVOICE/.
-        4. Tự động hoàn thành để chuyển sang hóa đơn tiếp theo.
+        4. Tự động chuyển ngay sang hóa đơn tiếp theo.
         """
         expected_key = InvoiceKey(
             mst_nguoi_ban=row_data.get("mst_nguoi_ban", ""),
@@ -459,40 +510,44 @@ class TaxPortalAutomation:
 
         for attempt in range(retry_limit + 1):
             try:
-                # 1. Cuộn đến dòng hóa đơn
-                try:
-                    row.scroll_into_view_if_needed(timeout=3000)
-                except Exception:
-                    pass
-                time.sleep(0.1)
+                # 1. Chọn dòng hóa đơn (click trực tiếp vào dòng/cell)
+                self._select_table_row(page, row, row_data, row_index=row_index)
 
-                # 2. Tìm nút 'Xuất xml' trên thanh công cụ
+                # 2. Tìm nút 'Xuất xml' trên thanh công cụ (ngoài cùng bên phải, sau nút Xuất hóa đơn)
                 export_btn = self._get_export_xml_button(page)
                 if not export_btn:
                     raise DownloadManagerError(
                         f"Không tìm thấy nút 'Xuất xml' trên thanh công cụ cho hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
-                # 3. Kích hoạt chọn dòng hóa đơn cho đến khi nút 'Xuất xml' được kích hoạt
-                self._select_table_row(page, row, row_data, export_btn)
-
-                # 4. Chờ thêm tối đa 2s nếu cần để nút 'Xuất xml' đổi sang trạng thái ENABLED
-                is_ready = export_btn.is_enabled()
+                # 3. Chờ nút 'Xuất xml' đổi sang trạng thái ENABLED (tối đa 2.5s)
+                is_ready = self._is_button_enabled(export_btn)
                 if not is_ready:
-                    for _ in range(10):
-                        time.sleep(0.2)
-                        if export_btn.is_enabled():
+                    for _ in range(12):
+                        time.sleep(0.15)
+                        export_btn = self._get_export_xml_button(page)
+                        if export_btn and self._is_button_enabled(export_btn):
                             is_ready = True
                             break
+
+                if not is_ready:
+                    # Thử click lại dòng lần cuối
+                    try:
+                        row.locator("td").nth(4).click(timeout=500)
+                        time.sleep(0.2)
+                        export_btn = self._get_export_xml_button(page)
+                        is_ready = export_btn and self._is_button_enabled(export_btn)
+                    except Exception:
+                        pass
 
                 if not is_ready:
                     raise DownloadManagerError(
                         f"Nút 'Xuất xml' vẫn bị disabled sau khi chọn hóa đơn số {expected_key.sh_hoa_don}"
                     )
 
-                logger.debug(f"Nút 'Xuất xml' đã enabled, kích hoạt download...")
+                logger.debug("Nút 'Xuất xml' đã sẵn sàng, kích hoạt download...")
 
-                # 5. Kích hoạt và bắt sự kiện download
+                # 4. Kích hoạt và bắt sự kiện download
                 temp_downloads_dir = self.download_manager.downloads_dir
                 with page.expect_download(timeout=25000) as download_info:
                     export_btn.click()
@@ -512,12 +567,12 @@ class TaxPortalAutomation:
                     except Exception:
                         pass
 
-                # 6. Nhận và lưu file tải về
+                # 5. Nhận và lưu file tải về
                 download = download_info.value
                 suggested_filename = download.suggested_filename or "invoice.zip"
                 logger.info(f"Đã nhận file tải về: {suggested_filename}")
 
-                # Bảo vệ an toàn: nếu vô tình tải về file Excel danh sách thì báo lỗi
+                # Bảo vệ an toàn: nếu vô tình tải về file Excel danh sách thì báo lỗi nhầm nút
                 if suggested_filename.lower().endswith((".xlsx", ".xls")):
                     raise DownloadManagerError(
                         f"Cổng Thuế trả về file Excel ({suggested_filename}) thay vì ZIP/XML hóa đơn"
@@ -530,7 +585,7 @@ class TaxPortalAutomation:
                 download.save_as(str(temp_save_path))
                 logger.info(f"Đã lưu file tạm: {temp_save_path.name}")
 
-                # 7. Xử lý ZIP → trích xuất invoice.xml → lưu ALLINVOICE/
+                # 6. Xử lý ZIP → trích xuất invoice.xml → lưu ALLINVOICE/
                 _, invoice_header = self.download_manager.process_downloaded_zip(
                     zip_path=temp_save_path,
                     expected_key=expected_key,
@@ -547,7 +602,7 @@ class TaxPortalAutomation:
                         f"Thử lại hóa đơn {expected_key.sh_hoa_don} "
                         f"(lần {attempt + 1}/{retry_limit}): {e}"
                     )
-                    time.sleep(1.5)
+                    time.sleep(1.0)
                 else:
                     logger.error(f"Thất bại khi tải hóa đơn {expected_key.sh_hoa_don}: {e}")
                     self.download_manager._record_failure(
@@ -665,7 +720,7 @@ class TaxPortalAutomation:
                     progress_callback(processed_count + 1, row_count, f"Đang tải: {candidate_key.sh_hoa_don}")
 
                 # Download invoice
-                self.download_invoice_row(page, row, row_data)
+                self.download_invoice_row(page, row, row_data, row_index=i)
                 processed_count += 1
 
                 # Polite delay between downloads
